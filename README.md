@@ -1,4 +1,4 @@
-# 🚁 UAV Deconfliction System - Enhanced Visualization Suite
+# 🚁 UAV Deconfliction System 
 
 ## 📋 Overview
 
@@ -155,7 +155,7 @@ python3 trajectory_control.py --mode test     # Run examples and benchmarks
 
 ### Enhanced Primary Drone
 The primary drone is visually enhanced to stand out:
-- **40x larger** than regular drones
+- **Larger** than regular drones
 - **Bright green pulsing glow** with searchlight
 - **Long glowing trail** showing exact path
 - **Compass** showing direction
