@@ -19,7 +19,7 @@ using json = nlohmann::json;
 const float TIME_STEP = 0.1f;  // 10 Hz update rate
 const float TOTAL_TIME = 200.0f;
 const int NUM_WAYPOINTS = static_cast<int>(TOTAL_TIME / TIME_STEP) + 1;
-const int DEFAULT_NUM_DRONES = 149; //number of scheduled drones
+const int DEFAULT_NUM_DRONES = 49; // number of scheduled drones
 const int MAX_DRONES = 1000;
 
 // Safe bounds for coordinates (meters)
@@ -50,6 +50,11 @@ const float SWARM_COHESION = 0.3f;         // Tendency to stay with group
 const float SWARM_SEPARATION = 0.4f;       // Tendency to avoid neighbors
 const float SWARM_ALIGNMENT = 0.3f;        // Tendency to align with neighbors
 const float SWARM_RADIUS = 50.0f;          // Communication/neighborhood radius
+
+// Primary drone parameters
+const float PRIMARY_DRONE_SPEED_FACTOR = 1.2f;  // Primary drone moves faster
+const int PRIMARY_START_TIME_MIN = 50;          // When primary drone appears (seconds)
+const int PRIMARY_START_TIME_MAX = 150;         // When primary drone appears (seconds)
 
 // Formation patterns
 enum FormationType {
@@ -102,8 +107,9 @@ struct DroneState {
     Vector3D target;
     float preferred_altitude;
     int formation_group;
+    bool is_primary_drone;
     
-    DroneState() : preferred_altitude(0), formation_group(0) {}
+    DroneState() : preferred_altitude(0), formation_group(0), is_primary_drone(false) {}
 };
 
 struct DroneWaypoints {
@@ -114,6 +120,9 @@ struct DroneWaypoints {
     std::vector<float> time;
     std::vector<float> velocity;
     std::vector<float> heading;
+    bool is_primary_drone;
+    
+    DroneWaypoints() : is_primary_drone(false) {}
 };
 
 struct DroneConfig {
@@ -125,6 +134,20 @@ struct DroneConfig {
     bool enable_traffic_lanes;
     float traffic_lane_width;
     int num_lanes;
+    bool generate_primary_drone;
+    std::string primary_drone_file;
+    
+    DroneConfig() : 
+        num_drones(DEFAULT_NUM_DRONES),
+        output_file("drone_waypoints.json"),
+        formation(FORMATION_RANDOM),
+        enable_collision_avoidance(true),
+        enable_swarm_behavior(true),
+        enable_traffic_lanes(false),
+        traffic_lane_width(50.0f),
+        num_lanes(5),
+        generate_primary_drone(false),
+        primary_drone_file("primary_waypoint.json") {}
 };
 
 class CollisionDetector {
@@ -180,7 +203,6 @@ public:
     }
 };
 
-// Helper functions
 template<typename T>
 T clamp_value(const T& value, const T& low, const T& high) {
     return (value < low) ? low : ((value > high) ? high : value);
@@ -432,6 +454,124 @@ std::vector<Vector3D> generateFormationPositions(int num_drones, FormationType f
     return positions;
 }
 
+// Generate a primary drone trajectory
+DroneWaypoints generatePrimaryDroneTrajectory(const std::vector<DroneWaypoints>& regular_drones,
+                                               int primary_start_step) {
+    std::mt19937 gen(std::random_device{}());
+    
+    // Create distributions
+    std::uniform_real_distribution<float> start_x_dist(X_MIN, X_MAX);
+    std::uniform_real_distribution<float> start_y_dist(Y_MIN, Y_MAX);
+    std::uniform_real_distribution<float> start_z_dist(Z_MIN + 20, Z_MAX - 20);
+    std::uniform_int_distribution<int> victim_dist(0, regular_drones.size() - 1);
+    std::uniform_int_distribution<int> collision_step_dist(primary_start_step + 10, 
+                                                          NUM_WAYPOINTS - 10);
+    std::uniform_real_distribution<float> perturb_dist(-2.0f, 2.0f);
+    
+    DroneWaypoints primary_drone;
+    primary_drone.id = "primary_drone";
+    primary_drone.is_primary_drone = true;
+    
+    // Random starting position outside the main area
+    Vector3D start_position(
+        (gen() % 2 == 0) ? X_MIN - 100 : X_MAX + 100,
+        start_y_dist(gen),
+        start_z_dist(gen)
+    );
+    
+    // Choose a random victim drone to collide with
+    int victim_id = victim_dist(gen);
+    
+    // Choose random collision time point (after start)
+    int collision_step = collision_step_dist(gen);
+    float collision_time = collision_step * TIME_STEP;
+    
+    // Get victim's position at collision time
+    float victim_x = regular_drones[victim_id].x[collision_step];
+    float victim_y = regular_drones[victim_id].y[collision_step];
+    float victim_z = regular_drones[victim_id].z[collision_step];
+    
+    Vector3D collision_position(victim_x, victim_y, victim_z);
+    
+    // Calculate trajectory to collision point
+    float time_to_collision = collision_time - (primary_start_step * TIME_STEP);
+    Vector3D direction_to_collision = (collision_position - start_position).normalized();
+    float distance_to_collision = (collision_position - start_position).length();
+    
+    // Calculate required velocity (slightly faster to ensure collision)
+    Vector3D collision_velocity = direction_to_collision * 
+        (distance_to_collision / time_to_collision) * PRIMARY_DRONE_SPEED_FACTOR;
+    
+    // Generate waypoints before collision
+    Vector3D current_position = start_position;
+    Vector3D current_velocity = collision_velocity;
+    
+    for (int step = 0; step < NUM_WAYPOINTS; ++step) {
+        float current_time = step * TIME_STEP;
+        
+        if (step < primary_start_step) {
+            // Not active yet - stay at starting position
+            current_position = start_position;
+            current_velocity = Vector3D(0, 0, 0);
+        } else if (step <= collision_step) {
+            // Move toward collision point
+            float progress = (step - primary_start_step) / 
+                           static_cast<float>(collision_step - primary_start_step);
+            
+            // Add some random perturbation to make it look more natural
+            Vector3D perturbation(perturb_dist(gen), perturb_dist(gen), perturb_dist(gen) * 0.5f);
+            
+            current_position = start_position + 
+                             (collision_position - start_position) * progress + 
+                             perturbation * progress * (1.0f - progress);
+            current_velocity = collision_velocity + perturbation * 0.1f;
+        } else {
+            // After collision - continue moving with some random motion
+            current_velocity = current_velocity * 0.95f + 
+                             Vector3D(perturb_dist(gen), perturb_dist(gen), perturb_dist(gen) * 0.3f);
+            
+            // Ensure velocity is not too high
+            float speed = current_velocity.length();
+            if (speed > MAX_VELOCITY * PRIMARY_DRONE_SPEED_FACTOR) {
+                current_velocity = current_velocity.normalized() * MAX_VELOCITY * PRIMARY_DRONE_SPEED_FACTOR;
+            }
+            
+            current_position = current_position + current_velocity * TIME_STEP;
+            
+            // Keep within bounds
+            current_position.x = clamp_value(current_position.x, X_MIN - 50, X_MAX + 50);
+            current_position.y = clamp_value(current_position.y, Y_MIN - 50, Y_MAX + 50);
+            current_position.z = clamp_value(current_position.z, Z_MIN + 5, Z_MAX - 5);
+        }
+        
+        // Store waypoint
+        primary_drone.time.push_back(current_time);
+        primary_drone.x.push_back(current_position.x);
+        primary_drone.y.push_back(current_position.y);
+        primary_drone.z.push_back(current_position.z);
+        
+        float speed = current_velocity.length();
+        primary_drone.velocity.push_back(speed);
+        
+        // Calculate heading
+        if (speed > 0.1f) {
+            float heading_rad = std::atan2(current_velocity.y, current_velocity.x);
+            float heading_deg = heading_rad * 180.0f / M_PI;
+            if (heading_deg < 0) heading_deg += 360.0f;
+            primary_drone.heading.push_back(heading_deg);
+        } else {
+            primary_drone.heading.push_back(primary_drone.heading.empty() ? 0.0f : 
+                                           primary_drone.heading.back());
+        }
+    }
+    
+    std::cout << "  Primary drone will collide with " << regular_drones[victim_id].id 
+              << " at t=" << collision_time << "s" << std::endl;
+    std::cout << "  Collision position: (" << victim_x << ", " << victim_y << ", " << victim_z << ")" << std::endl;
+    
+    return primary_drone;
+}
+
 // Run simulation
 std::vector<DroneWaypoints> runSimulation(const DroneConfig& config,
                                         const std::vector<Vector3D>& start_positions,
@@ -446,6 +586,7 @@ std::vector<DroneWaypoints> runSimulation(const DroneConfig& config,
         all_states[i].preferred_altitude = start_positions[i].z;
         all_states[i].velocity = Vector3D(0, 0, 0);
         all_states[i].formation_group = i % 10;
+        all_states[i].is_primary_drone = false;
     }
     
     // Main simulation loop
@@ -548,6 +689,7 @@ std::vector<DroneWaypoints> runSimulation(const DroneConfig& config,
                 drones[i].time.reserve(NUM_WAYPOINTS);
                 drones[i].velocity.reserve(NUM_WAYPOINTS);
                 drones[i].heading.reserve(NUM_WAYPOINTS);
+                drones[i].is_primary_drone = false;
             }
             
             // Store waypoint
@@ -591,10 +733,14 @@ bool validateTrajectories(const std::vector<DroneWaypoints>& drones) {
         // Create spatial grid for this time step
         CollisionDetector detector(X_MAX - X_MIN);
         for (size_t i = 0; i < drones.size(); ++i) {
-            detector.addDrone(i, drones[i].x[t], drones[i].y[t]);
+            if (!drones[i].is_primary_drone) {
+                detector.addDrone(i, drones[i].x[t], drones[i].y[t]);
+            }
         }
         
         for (size_t i = 0; i < drones.size(); ++i) {
+            if (drones[i].is_primary_drone) continue;
+            
             // Check bounds
             if (!isValidPosition(drones[i].x[t], drones[i].y[t], drones[i].z[t])) {
                 bounds_violations++;
@@ -604,7 +750,7 @@ bool validateTrajectories(const std::vector<DroneWaypoints>& drones) {
             auto nearby = detector.getNearbyDrones(i, drones[i].x[t], drones[i].y[t], MIN_SEPARATION * 2);
             
             for (int j : nearby) {
-                if (j <= static_cast<int>(i)) continue;
+                if (j <= static_cast<int>(i) || drones[j].is_primary_drone) continue;
                 
                 float dist = calculateDistance(drones[i].x[t], drones[i].y[t], drones[i].z[t],
                                               drones[j].x[t], drones[j].y[t], drones[j].z[t]);
@@ -634,14 +780,6 @@ bool validateTrajectories(const std::vector<DroneWaypoints>& drones) {
 // Parse command line arguments
 DroneConfig parseArguments(int argc, char* argv[]) {
     DroneConfig config;
-    config.num_drones = DEFAULT_NUM_DRONES;
-    config.output_file = "drone_waypoints.json";
-    config.formation = FORMATION_RANDOM;
-    config.enable_collision_avoidance = true;
-    config.enable_swarm_behavior = true;
-    config.enable_traffic_lanes = false;
-    config.traffic_lane_width = 50.0f;
-    config.num_lanes = 5;
     
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -663,21 +801,102 @@ DroneConfig parseArguments(int argc, char* argv[]) {
             config.enable_collision_avoidance = false;
         } else if (arg == "--no-swarm") {
             config.enable_swarm_behavior = false;
+        } else if (arg == "--primary-drone") {
+            config.generate_primary_drone = true;
+        } else if (arg == "--primary-drone-file" && i + 1 < argc) {
+            config.primary_drone_file = argv[++i];
+            config.generate_primary_drone = true;
         } else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " [options]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  --drones <num>        Number of drones (1-1000, default: " 
                       << DEFAULT_NUM_DRONES << ")" << std::endl;
-            std::cout << "  --output <file>       Output JSON file" << std::endl;
+            std::cout << "  --output <file>       Output JSON file for regular drones" << std::endl;
             std::cout << "  --formation <type>    random, grid, spiral, v, random_walk" << std::endl;
             std::cout << "  --no-collision-avoidance  Disable collision avoidance" << std::endl;
             std::cout << "  --no-swarm            Disable swarm behavior" << std::endl;
+            std::cout << "  --primary-drone       Generate a primary drone" << std::endl;
+            std::cout << "  --primary-drone-file <file>  Output file for primary drone" << std::endl;
             std::cout << "  --help                Show this help" << std::endl;
             exit(0);
         }
     }
     
     return config;
+}
+
+// Save drone waypoints to JSON file
+void saveDroneWaypointsToFile(const std::string& filename, const DroneWaypoints& drone) {
+    json j;
+    
+    j["id"] = drone.id;
+    j["is_collision_drone"] = drone.is_primary_drone;
+    
+    json waypoints_json = json::array();
+    for (size_t i = 0; i < drone.time.size(); ++i) {
+        waypoints_json.push_back({
+            {"time", drone.time[i]},
+            {"x", drone.x[i]},
+            {"y", drone.y[i]},
+            {"z", drone.z[i]},
+            {"velocity", drone.velocity[i]},
+            {"heading", drone.heading[i]}
+        });
+    }
+    
+    j["waypoints"] = waypoints_json;
+    
+    std::ofstream file(filename);
+    if (file.is_open()) {
+        file << j.dump(2);
+        file.close();
+        std::cout << "  Saved primary drone to: " << filename << std::endl;
+    } else {
+        std::cerr << "  Error: Could not open file " << filename << std::endl;
+    }
+}
+
+// Save all drones to JSON file
+void saveAllDronesToFile(const std::string& filename, const std::vector<DroneWaypoints>& drones) {
+    json j;
+    j["metadata"] = {
+        {"num_drones", static_cast<int>(drones.size())},
+        {"time_step", TIME_STEP},
+        {"total_time", TOTAL_TIME},
+        {"num_waypoints_per_drone", NUM_WAYPOINTS}
+    };
+    
+    json drones_json = json::array();
+    for (const auto& drone : drones) {
+        json drone_json = {
+            {"id", drone.id},
+            {"is_collision_drone", drone.is_primary_drone},
+            {"waypoints", json::array()}
+        };
+        
+        for (int i = 0; i < NUM_WAYPOINTS; ++i) {
+            drone_json["waypoints"].push_back({
+                {"time", drone.time[i]},
+                {"x", drone.x[i]},
+                {"y", drone.y[i]},
+                {"z", drone.z[i]},
+                {"velocity", drone.velocity[i]},
+                {"heading", drone.heading[i]}
+            });
+        }
+        
+        drones_json.push_back(drone_json);
+    }
+    
+    j["drones"] = drones_json;
+    
+    std::ofstream file(filename);
+    if (file.is_open()) {
+        file << j.dump(2);
+        file.close();
+    } else {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -692,6 +911,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Waypoints per drone: " << NUM_WAYPOINTS << std::endl;
     std::cout << "Collision avoidance: " << (config.enable_collision_avoidance ? "✓" : "✗") << std::endl;
     std::cout << "Swarm behavior: " << (config.enable_swarm_behavior ? "✓" : "✗") << std::endl;
+    std::cout << "Primary drone: " << (config.generate_primary_drone ? "✓" : "✗") << std::endl;
     
     std::cout << "Formation: ";
     switch (config.formation) {
@@ -715,90 +935,78 @@ int main(int argc, char* argv[]) {
     std::cout << "\nGenerating trajectories..." << std::endl;
     auto drones = runSimulation(config, start_positions, target_positions);
     
+    // Generate primary drone if requested
+    DroneWaypoints primary_drone;
+    if (config.generate_primary_drone) {
+        std::cout << "\nGenerating primary drone..." << std::endl;
+        
+        std::mt19937 gen(std::random_device{}());
+        std::uniform_int_distribution<int> start_step_dist(
+            PRIMARY_START_TIME_MIN / TIME_STEP,
+            PRIMARY_START_TIME_MAX / TIME_STEP
+        );
+        
+        int primary_start_step = start_step_dist(gen);
+        primary_drone = generatePrimaryDroneTrajectory(drones, primary_start_step);
+        
+        // Save primary drone to separate file
+        saveDroneWaypointsToFile(config.primary_drone_file, primary_drone);
+    }
+    
     // End timing
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
     std::cout << "\nSimulation completed in " << duration.count() << " seconds" << std::endl;
     
-    // Validate
+    // Validate (only regular drones)
     std::cout << "\nValidating trajectories..." << std::endl;
     bool safe = validateTrajectories(drones);
     
-    // Create JSON
-    json j;
-    j["metadata"] = {
-        {"num_drones", config.num_drones},
-        {"time_step", TIME_STEP},
-        {"total_time", TOTAL_TIME},
-        {"num_waypoints_per_drone", NUM_WAYPOINTS},
-        {"collision_avoidance", config.enable_collision_avoidance},
-        {"swarm_behavior", config.enable_swarm_behavior},
-        {"formation", config.formation}
-    };
+    // Save all regular drones to file
+    saveAllDronesToFile(config.output_file, drones);
     
-    json drones_json = json::array();
+    // Calculate statistics for regular drones
+    float total_distance = 0;
+    float max_speed = 0;
+    float avg_speed = 0;
+    int count = 0;
+    
     for (const auto& drone : drones) {
-        json drone_json = {
-            {"id", drone.id},
-            {"waypoints", json::array()}
-        };
+        if (drone.is_primary_drone) continue;
         
-        for (int i = 0; i < NUM_WAYPOINTS; ++i) {
-            drone_json["waypoints"].push_back({
-                {"time", drone.time[i]},
-                {"x", drone.x[i]},
-                {"y", drone.y[i]},
-                {"z", drone.z[i]},
-                {"velocity", drone.velocity[i]},
-                {"heading", drone.heading[i]}
-            });
+        count++;
+        for (float v : drone.velocity) {
+            total_distance += v * TIME_STEP;
+            avg_speed += v;
+            max_speed = std::max(max_speed, v);
         }
-        
-        drones_json.push_back(drone_json);
     }
     
-    j["drones"] = drones_json;
+    avg_speed /= (count * NUM_WAYPOINTS);
     
-    // Write to file
-    std::ofstream file(config.output_file);
-    if (file.is_open()) {
-        file << j.dump(2);
-        file.close();
-        
-        // Calculate statistics
-        float total_distance = 0;
-        float max_speed = 0;
-        float avg_speed = 0;
-        
-        for (const auto& drone : drones) {
-            for (float v : drone.velocity) {
-                total_distance += v * TIME_STEP;
-                avg_speed += v;
-                max_speed = std::max(max_speed, v);
-            }
-        }
-        
-        avg_speed /= (drones.size() * NUM_WAYPOINTS);
-        
-        std::cout << "\n==========================================" << std::endl;
-        std::cout << "Generation Complete!" << std::endl;
-        std::cout << "==========================================" << std::endl;
-        std::cout << "Output file: " << config.output_file << std::endl;
-        std::cout << "File size: ~" << (j.dump().size() / 1024 / 1024) << " MB" << std::endl;
-        std::cout << "\nStatistics:" << std::endl;
-        std::cout << "  Average speed: " << avg_speed << " m/s" << std::endl;
-        std::cout << "  Maximum speed: " << max_speed << " m/s" << std::endl;
-        std::cout << "  Total distance flown: " << total_distance/1000 << " km" << std::endl;
-        
-        if (safe) {
-            std::cout << "\n✓ Trajectories generated successfully!" << std::endl;
-        } else {
-            std::cout << "\n⚠ Warnings detected in trajectories" << std::endl;
-        }
-        
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "Generation Complete!" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    std::cout << "Regular drones file: " << config.output_file << std::endl;
+    std::cout << "Regular drones count: " << count << std::endl;
+    
+    if (config.generate_primary_drone) {
+        std::cout << "Primary drone file: " << config.primary_drone_file << std::endl;
+    }
+    
+    std::cout << "\nStatistics for regular drones:" << std::endl;
+    std::cout << "  Average speed: " << avg_speed << " m/s" << std::endl;
+    std::cout << "  Maximum speed: " << max_speed << " m/s" << std::endl;
+    std::cout << "  Total distance flown: " << total_distance/1000 << " km" << std::endl;
+    
+    if (safe) {
+        std::cout << "\n✓ Regular drone trajectories generated successfully!" << std::endl;
     } else {
-        std::cerr << "Error: Could not open file " << config.output_file << std::endl;
-        return 1;
+        std::cout << "\n⚠ Warnings detected in regular drone trajectories" << std::endl;
+    }
+    
+    if (config.generate_primary_drone) {
+        std::cout << "\n⚠ Primary drone generated - will collide with regular drones!" << std::endl;
     }
     
     return 0;

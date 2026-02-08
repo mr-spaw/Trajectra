@@ -1,7 +1,7 @@
 // Scalable Enhanced UAV Deconfliction Simulation (100-1000 drones)
-// Compile: g++ uav_simulation_json.cpp -o uav_sim -lglut -lGLU -lGL -std=c++17 -O3
+// Compile: g++ uav_simulation.cpp -o uav_sim -lglut -lGLU -lGL -std=c++17 -O3 -pthread
 // Features: JSON trajectory loading, Spatial partitioning, LOD system
-// Enhanced with better graphics and mouse wheel support
+// JSON-based collision loading
 
 #include <GL/glut.h>
 #include <cmath>
@@ -20,24 +20,18 @@
 #include <random>
 #include <chrono>
 #include <fstream>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <cstring>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <arpa/inet.h>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
-
-// ============================================================================
-// Configuration Constants
-// ============================================================================
-namespace Config {
-    // Adjust based on your JSON bounds
-    const float WORLD_SIZE = 1600.0f;           // Based on JSON bounds (-400 to 400)
-    const float GRID_SIZE = 1600.0f;
-    const float SAFETY_BUFFER = 5.0f;
-    const int MAX_DRONES = 1000;
-    const int SPATIAL_GRID_DIVISIONS = 40;
-    const float LOD_DISTANCE_NEAR = 400.0f;
-    const float LOD_DISTANCE_MID = 1000.0f;
-    const float LOD_DISTANCE_FAR = 2000.0f;
-}
 
 // ============================================================================
 // Enhanced Vector3D Class with Full 3D Math Support
@@ -107,79 +101,228 @@ public:
     Vector3D lerp(const Vector3D& target, float t) const {
         return *this + (target - *this) * t;
     }
+    
+    json toJson() const {
+        return json::object({
+            {"x", x},
+            {"y", y},
+            {"z", z}
+        });
+    }
+    
+    static Vector3D fromJson(const json& j) {
+        return Vector3D(
+            j.value("x", 0.0f),
+            j.value("y", 0.0f),
+            j.value("z", 0.0f)
+        );
+    }
 };
 
 // ============================================================================
-// Spatial Hash Grid for Efficient Collision Detection
+// Configuration Constants
 // ============================================================================
-class SpatialHashGrid {
-private:
-    struct Cell {
-        std::vector<int> droneIndices;
-    };
+namespace Config {
+    // Adjust based on your JSON bounds
+    const float WORLD_SIZE = 1600.0f;           // Based on JSON bounds (-400 to 400)
+    const float GRID_SIZE = 1600.0f;
+    const float SAFETY_BUFFER = 5.0f;
+    const int MAX_DRONES = 1000;
+    const int SPATIAL_GRID_DIVISIONS = 40;
+    const float LOD_DISTANCE_NEAR = 400.0f;
+    const float LOD_DISTANCE_MID = 1000.0f;
+    const float LOD_DISTANCE_FAR = 2000.0f;
     
-    float cellSize;
-    int gridWidth;
-    std::unordered_map<int, Cell> cells;
+    // Primary drone configuration
+    static const Vector3D PRIMARY_DRONE_COLOR() { return Vector3D(0.0f, 1.0f, 0.0f); }  // Green
+    const float PRIMARY_DRONE_SIZE = 40.0f;  // Larger than other drones
+}
+
+// ============================================================================
+// JSON-based Collision Data Loader
+// ============================================================================
+struct CollisionData {
+    std::string primary_drone_id;
+    std::string conflicting_drone_id;
+    Vector3D primary_location;
+    Vector3D conflict_location;
+    Vector3D location;
+    float time;
+    float distance;
+    std::string severity;
     
-    int hash(int x, int y, int z) const {
-        return x + y * gridWidth + z * gridWidth * gridWidth;
+    CollisionData() 
+        : time(0.0f), distance(0.0f), severity("LOW") {}
+    
+    json toJson() const {
+        return json::object({
+            {"primary_drone", primary_drone_id},
+            {"conflicting_drone", conflicting_drone_id},
+            {"primary_location", primary_location.toJson()},
+            {"conflict_location", conflict_location.toJson()},
+            {"location", location.toJson()},
+            {"time", time},
+            {"distance", distance},
+            {"severity", severity}
+        });
     }
     
-    void getCellCoords(const Vector3D& pos, int& x, int& y, int& z) const {
-        x = static_cast<int>(std::floor((pos.x + Config::WORLD_SIZE / 2) / cellSize));
-        y = static_cast<int>(std::floor((pos.y + Config::WORLD_SIZE / 2) / cellSize));
-        z = static_cast<int>(std::floor(pos.z / cellSize));
+    static CollisionData fromJson(const json& j) {
+        CollisionData data;
+        data.primary_drone_id = j.value("primary_drone", "");
+        data.conflicting_drone_id = j.value("conflicting_drone", "");
+        data.time = j.value("time", 0.0f);
+        data.distance = j.value("distance", 0.0f);
+        data.severity = j.value("severity", "LOW");
         
-        // Clamp to grid bounds
-        x = std::max(0, std::min(gridWidth - 1, x));
-        y = std::max(0, std::min(gridWidth - 1, y));
-        z = std::max(0, std::min(gridWidth - 1, z));
+        if (j.contains("primary_location")) {
+            data.primary_location = Vector3D::fromJson(j["primary_location"]);
+        }
+        
+        if (j.contains("conflict_location")) {
+            data.conflict_location = Vector3D::fromJson(j["conflict_location"]);
+        }
+        
+        if (j.contains("location")) {
+            data.location = Vector3D::fromJson(j["location"]);
+        }
+        
+        return data;
     }
+};
+
+class JSONCollisionLoader {
+private:
+    std::vector<CollisionData> collisions;
+    mutable std::mutex data_mutex;  // Make mutable for const methods
+    std::string analysis_file_path;
     
 public:
-    SpatialHashGrid(float worldSize, int divisions) 
-        : gridWidth(divisions) {
-        cellSize = worldSize / divisions;
+    JSONCollisionLoader(const std::string& file_path = "") : analysis_file_path(file_path) {
+        if (!file_path.empty()) {
+            loadFromJSON(file_path);
+        }
+    }
+    
+    bool loadFromJSON(const std::string& filename) {
+        analysis_file_path = filename;
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open analysis JSON file: " << filename << std::endl;
+            return false;
+        }
+        
+        try {
+            json root;
+            file >> root;
+            
+            std::lock_guard<std::mutex> lock(data_mutex);
+            collisions.clear();
+            
+            // Get metadata
+            if (root.contains("metadata")) {
+                json metadata = root["metadata"];
+                std::cout << "Collision Analysis Metadata:" << std::endl;
+                std::cout << "  Total conflicts: " << metadata.value("total_conflicts", 0) << std::endl;
+                std::cout << "  Total drones: " << metadata.value("total_drones", 0) << std::endl;
+                std::cout << "  Safety radius: " << metadata.value("safety_radius", 10.0f) << "m" << std::endl;
+            }
+            
+            // Load conflicts
+            if (root.contains("conflicts")) {
+                json json_conflicts = root["conflicts"];
+                for (const auto& conflict : json_conflicts) {
+                    CollisionData data = CollisionData::fromJson(conflict);
+                    collisions.push_back(data);
+                }
+                
+                std::cout << "Loaded " << collisions.size() << " collision entries from JSON." << std::endl;
+                
+                // Remove duplicates (optional - sometimes same conflict appears multiple times)
+                auto it = std::unique(collisions.begin(), collisions.end(),
+                    [](const CollisionData& a, const CollisionData& b) {
+                        return a.primary_drone_id == b.primary_drone_id &&
+                               a.conflicting_drone_id == b.conflicting_drone_id &&
+                               std::abs(a.time - b.time) < 0.1f;
+                    });
+                collisions.erase(it, collisions.end());
+                
+                std::cout << "After deduplication: " << collisions.size() << " unique collision entries." << std::endl;
+                return true;
+            }
+            return false;
+        }
+        catch (const json::exception& e) {
+            std::cerr << "Error: JSON parsing error: " << e.what() << std::endl;
+            return false;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            return false;
+        }
+    }
+    
+    void reload() {
+        if (!analysis_file_path.empty()) {
+            loadFromJSON(analysis_file_path);
+        }
+    }
+    
+    std::vector<CollisionData> getCollisionsAtTime(float time, float tolerance = 0.5f) const {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        std::vector<CollisionData> result;
+        
+        for (const auto& collision : collisions) {
+            if (std::abs(collision.time - time) <= tolerance) {
+                result.push_back(collision);
+            }
+        }
+        return result;
+    }
+    
+    std::vector<CollisionData> getAllCollisions() const {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        return collisions;
+    }
+    
+    std::vector<CollisionData> getCollisionsByDrone(int drone_id) const {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        std::vector<CollisionData> result;
+        std::string drone_str = "drone_" + std::to_string(drone_id);
+        
+        for (const auto& collision : collisions) {
+            if (collision.conflicting_drone_id == drone_str) {
+                result.push_back(collision);
+            }
+        }
+        return result;
     }
     
     void clear() {
-        cells.clear();
+        std::lock_guard<std::mutex> lock(data_mutex);
+        collisions.clear();
     }
     
-    void insert(int droneIndex, const Vector3D& position) {
-        int x, y, z;
-        getCellCoords(position, x, y, z);
-        int h = hash(x, y, z);
-        cells[h].droneIndices.push_back(droneIndex);
-    }
-    
-    std::vector<int> query(const Vector3D& position, float radius) const {
-        std::unordered_set<int> results;
+    void printStatus() const {
+        std::lock_guard<std::mutex> lock(data_mutex);
+        std::cout << "[Collision Loader] Total collisions: " << collisions.size() << std::endl;
         
-        int centerX, centerY, centerZ;
-        getCellCoords(position, centerX, centerY, centerZ);
-        
-        int cellRadius = static_cast<int>(std::ceil(radius / cellSize));
-        
-        for (int x = centerX - cellRadius; x <= centerX + cellRadius; x++) {
-            for (int y = centerY - cellRadius; y <= centerY + cellRadius; y++) {
-                for (int z = centerZ - cellRadius; z <= centerZ + cellRadius; z++) {
-                    if (x < 0 || x >= gridWidth || y < 0 || y >= gridWidth || 
-                        z < 0 || z >= gridWidth) continue;
-                    
-                    int h = hash(x, y, z);
-                    auto it = cells.find(h);
-                    if (it != cells.end()) {
-                        for (int idx : it->second.droneIndices) {
-                            results.insert(idx);
-                        }
-                    }
-                }
+        if (!collisions.empty()) {
+            std::cout << "Time range: " << collisions.front().time << "s to " 
+                      << collisions.back().time << "s" << std::endl;
+            
+            // Count by severity
+            std::map<std::string, int> severity_count;
+            for (const auto& c : collisions) {
+                severity_count[c.severity]++;
             }
+            
+            std::cout << "By severity: ";
+            for (const auto& [severity, count] : severity_count) {
+                std::cout << severity << ": " << count << " ";
+            }
+            std::cout << std::endl;
         }
-        
-        return std::vector<int>(results.begin(), results.end());
     }
 };
 
@@ -312,7 +455,7 @@ public:
     }
     
     float getTotalDuration() const {
-        if (waypoints.empty()) return 0;
+        if (waypoints.empty()) return 0.0f;
         return waypoints.back().timestamp;
     }
     
@@ -353,14 +496,12 @@ public:
         return waypoints[0].position;
     }
     
-    // New method for continuous looping
     bool loopTrajectory() {
         if (waypoints.empty()) return false;
         currentWaypointIndex = 0;
         return true;
     }
     
-    // Find nearest waypoint for current time (optimized for many waypoints)
     const Waypoint* getWaypointAtTime(float time) const {
         if (waypoints.empty()) return nullptr;
         
@@ -384,13 +525,12 @@ public:
         return &waypoints[0];
     }
     
-    // Direct position calculation from waypoints (more accurate for pre-planned trajectories)
     Vector3D getPositionAtTime(float time) const {
         if (waypoints.empty()) return Vector3D();
         
         float totalDuration = getTotalDuration();
         if (totalDuration > 0) {
-            time = fmod(time, totalDuration);
+            time = fmod(time, totalDuration);  // Wrap time for looping
         }
         
         for (size_t i = 0; i < waypoints.size() - 1; i++) {
@@ -425,20 +565,41 @@ private:
     
     // Trail effect
     std::vector<Vector3D> trail;
+    std::vector<float> trailTimes;
     int maxTrailLength;
     int trailUpdateCounter;
+    float pulseEffect;
+    float searchlightAngle;
     
     // For JSON-based trajectories
     bool usePreciseTrajectory;
     
+    // For primary drone
+    bool isPrimaryDrone;
+    
 public:
-    Drone(int id, Vector3D color = Vector3D(1, 0, 0))
-        : id(id), color(color), originalColor(color), currentTime(0), 
-          isActive(true), size(2.0f), rotorAngle(0), bodyTilt(0), 
-          maxTrailLength(50), trailUpdateCounter(0),
-          usePreciseTrajectory(false) {
-        idString = "UAV-" + std::to_string(id);
+    // In the Drone class constructor (around line 370-390)
+Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
+    : id(id), color(color), originalColor(color), currentTime(0), 
+      isActive(true), size(primary ? Config::PRIMARY_DRONE_SIZE : 2.0f), 
+      rotorAngle(0), bodyTilt(0), 
+      maxTrailLength(primary ? 500 : 50),  // Primary drone gets much longer trail
+      trailUpdateCounter(0), usePreciseTrajectory(false), isPrimaryDrone(primary) {
+    
+    idString = primary ? "PRIMARY" : ("UAV-" + std::to_string(id));
+    if (primary) {
+        originalColor = Config::PRIMARY_DRONE_COLOR();
+        color = Config::PRIMARY_DRONE_COLOR();
+        
+        // Primary drone starts with a few trail points at its initial position
+        if (!trajectory.getWaypoints().empty()) {
+            Vector3D startPos = trajectory.getWaypoints()[0].position;
+            for (int i = 0; i < 10; i++) {
+                trail.push_back(startPos);
+            }
+        }
     }
+}
     
     void setTrajectory(const Trajectory& traj, bool precise = false) {
         trajectory = traj;
@@ -451,7 +612,22 @@ public:
     void update(float deltaTime) {
         if (!isActive) return;
         
+        // Update simulation time
         currentTime += deltaTime;
+        
+        // Wrap time at 200 seconds for precise trajectory mode
+        if (usePreciseTrajectory) {
+            float totalDuration = trajectory.getTotalDuration();
+            if (totalDuration > 0) {
+                // Reset to 0 when we reach total duration
+                if (currentTime >= totalDuration) {
+                    currentTime = 0.0f;
+                    // Reset trail when restarting
+                    trail.clear();
+                }
+            }
+        }
+        
         rotorAngle += deltaTime * 1000.0f;
         if (rotorAngle > 360.0f) rotorAngle -= 360.0f;
         
@@ -460,7 +636,11 @@ public:
             Vector3D targetPos = trajectory.getPositionAtTime(currentTime);
             
             // Calculate velocity from trajectory for smooth movement
-            Vector3D nextPos = trajectory.getPositionAtTime(currentTime + 0.1f);
+            float nextTime = currentTime + 0.1f;
+            if (nextTime >= trajectory.getTotalDuration()) {
+                nextTime = 0.0f; // Wrap around
+            }
+            Vector3D nextPos = trajectory.getPositionAtTime(nextTime);
             Vector3D desiredVel = (nextPos - targetPos) * 10.0f; // Convert to velocity
             
             // Apply smooth movement
@@ -484,6 +664,9 @@ public:
                 Vector3D horizVel(physics.velocity.x, physics.velocity.y, 0);
                 float horizSpeed = horizVel.length();
                 bodyTilt = std::min(horizSpeed * 2.0f, 25.0f);
+            } else {
+                // Close enough to target
+                physics.position = targetPos;
             }
         } else {
             // Use physics-based navigation
@@ -518,7 +701,7 @@ public:
     }
     
     void reset() {
-        currentTime = 0;
+        currentTime = 0;  // Reset to time 0
         isActive = true;
         trajectory.reset();
         if (!trajectory.getWaypoints().empty()) {
@@ -544,9 +727,20 @@ public:
     float getBodyTilt() const { return bodyTilt; }
     const std::vector<Vector3D>& getTrail() const { return trail; }
     const Trajectory& getTrajectory() const { return trajectory; }
+    bool getIsPrimary() const { return isPrimaryDrone; }
     
-    void setColor(Vector3D newColor) { color = newColor; }
-    void resetColor() { color = originalColor; }
+    void setColor(Vector3D newColor) { 
+        if (!isPrimaryDrone) {  // Don't change primary drone color
+            color = newColor; 
+        }
+    }
+    void resetColor() { 
+        if (isPrimaryDrone) {
+            color = Config::PRIMARY_DRONE_COLOR();
+        } else {
+            color = originalColor; 
+        }
+    }
     
     Vector3D predictPosition(float futureTime) const {
         if (usePreciseTrajectory) {
@@ -565,107 +759,6 @@ public:
 };
 
 // ============================================================================
-// Advanced 4D Conflict Detection System
-// ============================================================================
-struct Conflict {
-    std::pair<int, int> droneIds;
-    Vector3D location;
-    float time;
-    float distance;
-    float severity;
-    std::string description;
-};
-
-class ConflictDetector {
-private:
-    float safetyBuffer;
-    float predictionTime;
-    std::vector<Conflict> conflicts;
-    std::vector<Conflict> predictions;
-    SpatialHashGrid spatialGrid;
-    
-    bool checkConflictAtTime(const Drone* d1, const Drone* d2, 
-                            float time, Conflict& conflict) {
-        Vector3D pos1 = d1->predictPosition(time);
-        Vector3D pos2 = d2->predictPosition(time);
-        float distSq = pos1.distanceSquared(pos2);
-        float bufferSq = safetyBuffer * safetyBuffer;
-        
-        if (distSq < bufferSq) {
-            float distance = sqrt(distSq);
-            conflict.droneIds = {d1->getId(), d2->getId()};
-            conflict.location = (pos1 + pos2) * 0.5f;
-            conflict.time = time;
-            conflict.distance = distance;
-            conflict.severity = 1.0f - (distance / safetyBuffer);
-            
-            std::ostringstream desc;
-            desc << std::fixed << std::setprecision(1);
-            desc << "Sep: " << distance << "m";
-            conflict.description = desc.str();
-            
-            return true;
-        }
-        return false;
-    }
-    
-public:
-    ConflictDetector(float buffer = Config::SAFETY_BUFFER, float predTime = 10.0f) 
-        : safetyBuffer(buffer), predictionTime(predTime),
-          spatialGrid(Config::WORLD_SIZE, Config::SPATIAL_GRID_DIVISIONS) {}
-    
-    void checkForConflicts(const std::vector<std::unique_ptr<Drone>>& drones, float currentTime) {
-        conflicts.clear();
-        predictions.clear();
-        spatialGrid.clear();
-        
-        // Build spatial grid
-        for (size_t i = 0; i < drones.size(); i++) {
-            if (drones[i]->getIsActive()) {
-                spatialGrid.insert(i, drones[i]->getPosition());
-            }
-        }
-        
-        // Check conflicts using spatial partitioning
-        for (size_t i = 0; i < drones.size(); i++) {
-            if (!drones[i]->getIsActive()) continue;
-            
-            Vector3D pos = drones[i]->getPosition();
-            auto nearbyIndices = spatialGrid.query(pos, safetyBuffer * 2.0f);
-            
-            for (int j : nearbyIndices) {
-                if (j <= i || !drones[j]->getIsActive()) continue;
-                
-                Conflict conflict;
-                if (checkConflictAtTime(drones[i].get(), drones[j].get(), 0, conflict)) {
-                    conflict.time = currentTime;
-                    conflicts.push_back(conflict);
-                }
-                
-                // Predictive conflicts (sample fewer for performance)
-                for (float t = 2.0f; t <= predictionTime; t += 2.0f) {
-                    Conflict predConflict;
-                    if (checkConflictAtTime(drones[i].get(), drones[j].get(), t, predConflict)) {
-                        predConflict.time = currentTime + t;
-                        predictions.push_back(predConflict);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    
-    const std::vector<Conflict>& getConflicts() const { return conflicts; }
-    const std::vector<Conflict>& getPredictions() const { return predictions; }
-    
-    bool hasConflicts() const { return !conflicts.empty(); }
-    bool hasPredictions() const { return !predictions.empty(); }
-    
-    void setSafetyBuffer(float buffer) { safetyBuffer = buffer; }
-    float getSafetyBuffer() const { return safetyBuffer; }
-};
-
-// ============================================================================
 // Enhanced Display List Cache for Better Drone Graphics
 // ============================================================================
 class DisplayListCache {
@@ -674,7 +767,79 @@ private:
     GLuint droneMediumDetail;
     GLuint droneLowDetail;
     GLuint rotorList;
+    GLuint primaryDroneList;  // Special display list for primary drone
     bool initialized;
+    
+    void createPrimaryDrone() {
+        primaryDroneList = glGenLists(1);
+        glNewList(primaryDroneList, GL_COMPILE);
+        
+        float size = Config::PRIMARY_DRONE_SIZE;
+        
+        // Glowing core
+        glPushMatrix();
+        glScalef(size, size * 0.9f, size * 0.6f);
+        
+        // Inner bright core
+        glColor3f(0.0f, 1.0f, 0.0f);
+        glutSolidSphere(0.8f, 16, 16);
+        
+        // Outer glow effect
+        glEnable(GL_BLEND);
+        glColor4f(0.0f, 1.0f, 0.0f, 0.3f);
+        glutSolidSphere(1.0f, 12, 12);
+        glDisable(GL_BLEND);
+        glPopMatrix();
+        
+        // Enhanced metallic frame
+        glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT);
+        glColor3f(0.5f, 1.0f, 0.5f);
+        glLineWidth(2.5f);
+        glPushMatrix();
+        glScalef(size, size * 0.9f, size * 0.6f);
+        glutWireSphere(0.85f, 16, 16);
+        glPopMatrix();
+        glPopAttrib();
+        
+        // Arms with green glow
+        float armLength = size * 1.8f;
+        float armThickness = size * 0.2f;
+        
+        for (int i = 0; i < 4; i++) {
+            glPushMatrix();
+            
+            float posX = (i % 2 == 0) ? armLength/2 : -armLength/2;
+            float posY = (i < 2) ? armLength/2 : -armLength/2;
+            
+            glTranslatef(posX, posY, 0);
+            
+            // Rotate arm to correct orientation
+            if (i < 2) {
+                glRotatef(90, 0, 0, 1);
+            }
+            
+            // Draw tapered arm with glow
+            glEnable(GL_BLEND);
+            glColor4f(0.0f, 0.8f, 0.0f, 0.6f);
+            glBegin(GL_QUAD_STRIP);
+            for (int j = 0; j <= 10; j++) {
+                float t = j / 10.0f;
+                float x = armLength/2 - t * armLength;
+                float r = armThickness * (1.0f - t * 0.3f);
+                
+                glVertex3f(x, -r, -r);
+                glVertex3f(x, -r, r);
+                glVertex3f(x, r, -r);
+                glVertex3f(x, r, r);
+            }
+            glEnd();
+            glDisable(GL_BLEND);
+            
+            glPopMatrix();
+        }
+        
+        glEndList();
+    }
     
     void createFullDetailDrone() {
         droneFullDetail = glGenLists(1);
@@ -826,6 +991,7 @@ public:
     void initialize() {
         if (initialized) return;
         
+        createPrimaryDrone();
         createFullDetailDrone();
         createRotorModel();
         createMediumDetailDrone();
@@ -841,6 +1007,7 @@ public:
         glDeleteLists(droneMediumDetail, 1);
         glDeleteLists(droneLowDetail, 1);
         glDeleteLists(rotorList, 1);
+        glDeleteLists(primaryDroneList, 1);
         
         initialized = false;
     }
@@ -849,6 +1016,7 @@ public:
     GLuint getMediumDetail() const { return droneMediumDetail; }
     GLuint getLowDetail() const { return droneLowDetail; }
     GLuint getRotorModel() const { return rotorList; }
+    GLuint getPrimaryDrone() const { return primaryDroneList; }
     
     ~DisplayListCache() {
         cleanup();
@@ -888,6 +1056,7 @@ private:
     int currentScenario;
     float timeScale;
     std::string currentTrajectoryFile;
+    std::string currentAnalysisFile;
     
     void drawText(float x, float y, const std::string& text, void* font = GLUT_BITMAP_HELVETICA_12) {
         glRasterPos2f(x, y);
@@ -989,7 +1158,7 @@ private:
         
         // Point rendering for very distant drones
         if (lod == LOD_POINT) {
-            glPointSize(4.0f);
+            glPointSize(drone.getIsPrimary() ? 8.0f : 4.0f);
             glDisable(GL_LIGHTING);
             glEnable(GL_POINT_SMOOTH);
             glColor3f(color.x, color.y, color.z);
@@ -1023,61 +1192,78 @@ private:
         glMaterialfv(GL_FRONT, GL_SPECULAR, matSpecular);
         glMaterialfv(GL_FRONT, GL_SHININESS, matShininess);
         
-        // Render based on LOD
-        switch (lod) {
-            case LOD_HIGH:
-                glCallList(displayCache.getFullDetail());
-                
-                // Draw rotors with spinning animation
-                if (distance < Config::LOD_DISTANCE_NEAR / 2) {
-                    float rotorAngle = drone.getRotorAngle();
-                    float size = drone.getSize();
-                    float armLength = size * 1.5f;
+        // Special rendering for primary drone
+        if (drone.getIsPrimary() && lod == LOD_HIGH) {
+            glCallList(displayCache.getPrimaryDrone());
+            
+            // Draw pulsing glow around primary drone
+            static float pulse = 0.0f;
+            pulse += 0.1f;
+            float pulseSize = 15.0f + sin(pulse) * 3.0f;
+            
+            glDisable(GL_LIGHTING);
+            glEnable(GL_BLEND);
+            glColor4f(0.0f, 1.0f, 0.0f, 0.2f);
+            glutWireSphere(pulseSize, 16, 16);
+            glDisable(GL_BLEND);
+            glEnable(GL_LIGHTING);
+        } else {
+            // Regular drone rendering
+            switch (lod) {
+                case LOD_HIGH:
+                    glCallList(displayCache.getFullDetail());
                     
-                    float rotorPositions[4][2] = {
-                        {armLength, armLength},
-                        {-armLength, armLength},
-                        {armLength, -armLength},
-                        {-armLength, -armLength}
-                    };
-                    
-                    for (int i = 0; i < 4; i++) {
-                        glPushMatrix();
-                        glTranslatef(rotorPositions[i][0], rotorPositions[i][1], size/4);
-                        glRotatef(rotorAngle + i * 90, 0, 0, 1);
-                        glScalef(0.8f, 0.8f, 0.8f);
-                        glCallList(displayCache.getRotorModel());
-                        glPopMatrix();
+                    // Draw rotors with spinning animation
+                    if (distance < Config::LOD_DISTANCE_NEAR / 2) {
+                        float rotorAngle = drone.getRotorAngle();
+                        float size = drone.getSize();
+                        float armLength = size * 1.5f;
+                        
+                        float rotorPositions[4][2] = {
+                            {armLength, armLength},
+                            {-armLength, armLength},
+                            {armLength, -armLength},
+                            {-armLength, -armLength}
+                        };
+                        
+                        for (int i = 0; i < 4; i++) {
+                            glPushMatrix();
+                            glTranslatef(rotorPositions[i][0], rotorPositions[i][1], size/4);
+                            glRotatef(rotorAngle + i * 90, 0, 0, 1);
+                            glScalef(0.8f, 0.8f, 0.8f);
+                            glCallList(displayCache.getRotorModel());
+                            glPopMatrix();
+                        }
+                        
+                        // Draw subtle light effect under drones
+                        if (distance < 50.0f) {
+                            glDisable(GL_LIGHTING);
+                            glEnable(GL_BLEND);
+                            glColor4f(color.x, color.y, color.z, 0.1f);
+                            glBegin(GL_QUADS);
+                            float lightSize = 3.0f;
+                            glVertex3f(-lightSize, -lightSize, -1.0f);
+                            glVertex3f(lightSize, -lightSize, -1.0f);
+                            glVertex3f(lightSize, lightSize, -1.0f);
+                            glVertex3f(-lightSize, lightSize, -1.0f);
+                            glEnd();
+                            glDisable(GL_BLEND);
+                            glEnable(GL_LIGHTING);
+                        }
                     }
+                    break;
                     
-                    // Draw subtle light effect under drones
-                    if (distance < 50.0f) {
-                        glDisable(GL_LIGHTING);
-                        glEnable(GL_BLEND);
-                        glColor4f(color.x, color.y, color.z, 0.1f);
-                        glBegin(GL_QUADS);
-                        float lightSize = 3.0f;
-                        glVertex3f(-lightSize, -lightSize, -1.0f);
-                        glVertex3f(lightSize, -lightSize, -1.0f);
-                        glVertex3f(lightSize, lightSize, -1.0f);
-                        glVertex3f(-lightSize, lightSize, -1.0f);
-                        glEnd();
-                        glDisable(GL_BLEND);
-                        glEnable(GL_LIGHTING);
-                    }
-                }
-                break;
-                
-            case LOD_MEDIUM:
-                glCallList(displayCache.getMediumDetail());
-                break;
-                
-            case LOD_LOW:
-                glCallList(displayCache.getLowDetail());
-                break;
-                
-            default:
-                break;
+                case LOD_MEDIUM:
+                    glCallList(displayCache.getMediumDetail());
+                    break;
+                    
+                case LOD_LOW:
+                    glCallList(displayCache.getLowDetail());
+                    break;
+                    
+                default:
+                    break;
+            }
         }
         
         // Reset material
@@ -1088,7 +1274,7 @@ private:
         
         glPopMatrix();
         
-        // Draw velocity vector with glow effect
+        // Draw velocity vector with glow effect (only for high LOD)
         if (lod == LOD_HIGH && drone.getSpeed() > 0.1f) {
             Vector3D vel = drone.getVelocity().normalized() * 8.0f;
             glDisable(GL_LIGHTING);
@@ -1126,7 +1312,7 @@ private:
             float labelWidth = drone.getIdString().length() * 4.0f;
             float labelX = pos.x - labelWidth/2;
             float labelY = pos.y;
-            float labelZ = pos.z + 8.0f;
+            float labelZ = pos.z + (drone.getIsPrimary() ? 12.0f : 8.0f);
             
             glVertex3f(labelX - 2, labelY - 2, labelZ);
             glVertex3f(labelX + labelWidth + 2, labelY - 2, labelZ);
@@ -1134,8 +1320,12 @@ private:
             glVertex3f(labelX - 2, labelY + 8, labelZ);
             glEnd();
             
-            // Draw text
-            glColor3f(1.0f, 1.0f, 1.0f);
+            // Draw text with different color for primary drone
+            if (drone.getIsPrimary()) {
+                glColor3f(0.0f, 1.0f, 0.0f);
+            } else {
+                glColor3f(1.0f, 1.0f, 1.0f);
+            }
             drawText3D(labelX, labelY, labelZ + 0.1f, drone.getIdString());
             
             glDisable(GL_BLEND);
@@ -1153,7 +1343,7 @@ private:
         Vector3D color = drone.getColor();
         glDisable(GL_LIGHTING);
         glEnable(GL_BLEND);
-        glLineWidth(2.5f);
+        glLineWidth(drone.getIsPrimary() ? 3.0f : 2.5f);
         
         // Draw trail with gradient
         glBegin(GL_LINE_STRIP);
@@ -1161,17 +1351,25 @@ private:
             float alpha = pow((float)i / trail.size(), 2.0f); // Fade faster
             float widthScale = 1.0f - alpha * 0.7f;
             
-            glColor4f(color.x, color.y, color.z, alpha * 0.6f);
+            if (drone.getIsPrimary()) {
+                glColor4f(color.x, color.y, color.z, alpha * 0.8f);
+            } else {
+                glColor4f(color.x, color.y, color.z, alpha * 0.6f);
+            }
             glVertex3f(trail[i].x, trail[i].y, trail[i].z);
         }
         glEnd();
         
         // Draw trail dots at intervals
-        glPointSize(3.0f);
+        glPointSize(drone.getIsPrimary() ? 4.0f : 3.0f);
         glBegin(GL_POINTS);
         for (size_t i = 0; i < trail.size(); i += 5) {
             float alpha = pow((float)i / trail.size(), 1.5f);
-            glColor4f(color.x, color.y, color.z, alpha * 0.8f);
+            if (drone.getIsPrimary()) {
+                glColor4f(color.x, color.y, color.z, alpha * 1.0f);
+            } else {
+                glColor4f(color.x, color.y, color.z, alpha * 0.8f);
+            }
             glVertex3f(trail[i].x, trail[i].y, trail[i].z);
         }
         glEnd();
@@ -1192,12 +1390,18 @@ private:
         Vector3D color = drone.getColor();
         
         glDisable(GL_LIGHTING);
-        glColor4f(color.x * 0.5f, color.y * 0.5f, color.z * 0.5f, 0.4f);
-        glLineWidth(1.5f);
+        if (drone.getIsPrimary()) {
+            glColor4f(color.x * 0.8f, color.y * 0.8f, color.z * 0.8f, 0.6f);
+            glLineWidth(2.0f);
+        } else {
+            glColor4f(color.x * 0.5f, color.y * 0.5f, color.z * 0.5f, 0.4f);
+            glLineWidth(1.5f);
+        }
+        
         glEnable(GL_LINE_STIPPLE);
         glLineStipple(2, 0xAAAA);
         
-        // Draw sampled trajectory (don't draw all 2000 waypoints)
+        // Draw sampled trajectory (don't draw all waypoints)
         int sampleStep = std::max(1, (int)waypoints.size() / 100);
         glBegin(GL_LINE_STRIP);
         for (size_t i = 0; i < waypoints.size(); i += sampleStep) {
@@ -1224,12 +1428,20 @@ private:
                 if (i < currentIdx) {
                     glColor4f(0.3f, 0.3f, 0.3f, 0.4f);
                 } else if (i == currentIdx) {
-                    glColor4f(1.0f, 1.0f, 0.0f, 0.7f);
+                    if (drone.getIsPrimary()) {
+                        glColor4f(1.0f, 1.0f, 0.0f, 0.9f);
+                    } else {
+                        glColor4f(1.0f, 1.0f, 0.0f, 0.7f);
+                    }
                 } else {
-                    glColor4f(color.x, color.y, color.z, 0.5f);
+                    if (drone.getIsPrimary()) {
+                        glColor4f(color.x, color.y, color.z, 0.7f);
+                    } else {
+                        glColor4f(color.x, color.y, color.z, 0.5f);
+                    }
                 }
                 
-                glutWireSphere(1.5f, 8, 8);
+                glutWireSphere(drone.getIsPrimary() ? 2.0f : 1.5f, 8, 8);
                 glPopMatrix();
             }
         }
@@ -1237,23 +1449,33 @@ private:
         glEnable(GL_LIGHTING);
     }
     
-    void drawConflictZone(const Conflict& conflict, bool isPrediction = false) {
-        Vector3D pos = conflict.location;
+    void drawCollisionZone(const CollisionData& collision, float currentTime) {
+        Vector3D pos = collision.location;
+        
+        // Only draw if collision time is close to current time
+        if (std::abs(collision.time - currentTime) > 2.0f) return;
         
         glPushMatrix();
         glTranslatef(pos.x, pos.y, pos.z);
         
         float red, green, blue, alpha;
-        if (isPrediction) {
-            red = 1.0f;
-            green = 0.5f;
-            blue = 0.0f;
-            alpha = 0.15f + conflict.severity * 0.15f;
-        } else {
+        
+        // Set color based on severity
+        if (collision.severity == "HIGH") {
             red = 1.0f;
             green = 0.0f;
             blue = 0.0f;
-            alpha = 0.2f + conflict.severity * 0.2f;
+            alpha = 0.3f;
+        } else if (collision.severity == "MEDIUM") {
+            red = 1.0f;
+            green = 0.5f;
+            blue = 0.0f;
+            alpha = 0.25f;
+        } else { // LOW
+            red = 1.0f;
+            green = 1.0f;
+            blue = 0.0f;
+            alpha = 0.2f;
         }
         
         glDisable(GL_LIGHTING);
@@ -1261,23 +1483,45 @@ private:
         
         // Outer glow
         glColor4f(red, green, blue, alpha * 0.5f);
-        glutSolidSphere(15.0f, 16, 16);
+        glutSolidSphere(20.0f, 16, 16);
         
         // Inner core
         glColor4f(red, green, blue, alpha);
-        glutSolidSphere(10.0f, 16, 16);
+        glutSolidSphere(15.0f, 16, 16);
         
-        // Pulsing effect for active conflicts
+        // Pulsing effect
         static float pulse = 0.0f;
-        pulse += 0.1f;
-        float pulseSize = 12.0f + sin(pulse) * 2.0f;
+        pulse += 0.15f;
+        float pulseSize = 18.0f + sin(pulse) * 3.0f;
         
-        glColor4f(red, green, blue, alpha * 0.3f);
+        glColor4f(red, green, blue, alpha * 0.4f);
         glutWireSphere(pulseSize, 12, 12);
         
         // Warning rings
         glColor4f(1.0f, 1.0f, 1.0f, 0.6f);
-        glutWireSphere(12.0f, 8, 8);
+        glutWireSphere(16.0f, 8, 8);
+        
+        // Draw line between primary and conflicting drone
+        glBegin(GL_LINES);
+        glColor4f(1.0f, 0.5f, 0.0f, 0.8f);
+        glVertex3f(collision.primary_location.x - pos.x, 
+                  collision.primary_location.y - pos.y, 
+                  collision.primary_location.z - pos.z);
+        glVertex3f(collision.conflict_location.x - pos.x, 
+                  collision.conflict_location.y - pos.y, 
+                  collision.conflict_location.z - pos.z);
+        glEnd();
+        
+        // Draw distance text
+        glColor4f(1.0f, 1.0f, 1.0f, 0.8f);
+        std::ostringstream distText;
+        distText << std::fixed << std::setprecision(1) << collision.distance << "m";
+        drawText3D(-5, -5, 10, distText.str());
+        
+        // Draw time text
+        std::ostringstream timeText;
+        timeText << "t=" << std::fixed << std::setprecision(1) << collision.time << "s";
+        drawText3D(-5, -5, 15, timeText.str());
         
         glDisable(GL_BLEND);
         glEnable(GL_LIGHTING);
@@ -1285,7 +1529,7 @@ private:
     }
     
     void drawHUD(const std::vector<std::unique_ptr<Drone>>& drones, 
-                 const ConflictDetector& detector, float simTime) {
+                 const JSONCollisionLoader& collisionLoader, float simTime) {
         glMatrixMode(GL_PROJECTION);
         glPushMatrix();
         glLoadIdentity();
@@ -1311,71 +1555,123 @@ private:
         
         // Time and drone count
         int activeDrones = 0;
+        int primaryDrones = 0;
         for (const auto& drone : drones) {
-            if (drone->getIsActive()) activeDrones++;
+            if (drone->getIsActive()) {
+                activeDrones++;
+                if (drone->getIsPrimary()) primaryDrones++;
+            }
         }
         
         glColor3f(1.0f, 1.0f, 1.0f);
         std::ostringstream topInfo;
         topInfo << "Time: " << std::fixed << std::setprecision(1) << simTime << "s";
         topInfo << " | Drones: " << activeDrones << "/" << drones.size();
+        topInfo << " (Primary: " << primaryDrones << ")";
         topInfo << " | FPS: " << std::setprecision(0) << currentFPS;
         drawText(10, 700, topInfo.str(), GLUT_BITMAP_HELVETICA_12);
         
-        // Status indicator (right side)
-        const auto& conflicts = detector.getConflicts();
-        const auto& predictions = detector.getPredictions();
+        // Collision status (right side)
+        auto collisions = collisionLoader.getAllCollisions();
+        auto currentCollisions = collisionLoader.getCollisionsAtTime(simTime, 1.0f);
         
         std::string statusText;
         Vector3D statusColor(0.8f, 0.8f, 0.8f);
         
-        if (!conflicts.empty()) {
-            statusText = "✗ " + std::to_string(conflicts.size()) + " CONFLICTS";
+        if (!currentCollisions.empty()) {
+            statusText = "✗ " + std::to_string(currentCollisions.size()) + " ACTIVE COLLISIONS";
             statusColor = Vector3D(1.0f, 0.3f, 0.3f);
-        } else if (!predictions.empty()) {
-            statusText = "⚠ " + std::to_string(predictions.size()) + " PREDICTED";
-            statusColor = Vector3D(1.0f, 0.8f, 0.3f);
+        } else if (!collisions.empty()) {
+            // Count upcoming collisions in next 10 seconds
+            int upcoming = 0;
+            for (const auto& c : collisions) {
+                if (c.time > simTime && c.time <= simTime + 10.0f) {
+                    upcoming++;
+                }
+            }
+            if (upcoming > 0) {
+                statusText = "⚠ " + std::to_string(upcoming) + " UPCOMING COLLISIONS";
+                statusColor = Vector3D(1.0f, 0.8f, 0.3f);
+            } else {
+                statusText = "✓ ALL CLEAR";
+                statusColor = Vector3D(0.3f, 1.0f, 0.3f);
+            }
         } else {
-            statusText = "✓ ALL CLEAR";
-            statusColor = Vector3D(0.3f, 1.0f, 0.3f);
+            statusText = "✓ NO COLLISION DATA";
+            statusColor = Vector3D(0.7f, 0.7f, 0.9f);
         }
         
         glColor3f(statusColor.x, statusColor.y, statusColor.z);
-        drawText(1100, 700, statusText, GLUT_BITMAP_HELVETICA_12);
+        drawText(1000, 700, statusText, GLUT_BITMAP_HELVETICA_12);
         
-        // Trajectory info
+        // File info
         glColor3f(0.7f, 0.7f, 0.9f);
-        std::ostringstream trajInfo;
-        trajInfo << "Trajectory: " << currentTrajectoryFile;
-        trajInfo << " | Speed: " << std::fixed << std::setprecision(1) << timeScale << "x";
-        drawText(10, 680, trajInfo.str(), GLUT_BITMAP_HELVETICA_10);
+        std::ostringstream fileInfo;
+        fileInfo << "Trajectory: " << currentTrajectoryFile;
+        drawText(10, 680, fileInfo.str(), GLUT_BITMAP_HELVETICA_10);
         
-        // Controls hint at bottom
-        glColor4f(1.0f, 1.0f, 1.0f, 0.6f);
-        drawText(10, 15, "[H] HUD  [G] Grid  [T] Trails  [C] Conflicts  [L] Labels  [SPACE] Pause  [R] Reset", GLUT_BITMAP_HELVETICA_10);
-        drawText(10, 5, "[Mouse] Rotate/Zoom  [Wheel] Zoom  [1-4] Speed  [+/-] Drones  [N] Load Trajectory", GLUT_BITMAP_HELVETICA_10);
+        if (!currentAnalysisFile.empty()) {
+            glColor3f(0.7f, 0.9f, 0.7f);
+            std::ostringstream analysisInfo;
+            analysisInfo << "Analysis: " << currentAnalysisFile << " (" << collisions.size() << " collisions)";
+            drawText(10, 670, analysisInfo.str(), GLUT_BITMAP_HELVETICA_10);
+        }
         
-        // Conflict notification (only when conflicts exist)
-        if (!conflicts.empty()) {
-            float notifX = 1280 - 220;
+        // Speed and time info
+        glColor3f(0.9f, 0.9f, 0.7f);
+        std::ostringstream speedInfo;
+        speedInfo << "Speed: " << std::fixed << std::setprecision(1) << timeScale << "x";
+        drawText(10, 660, speedInfo.str(), GLUT_BITMAP_HELVETICA_10);
+        
+        // Primary drone info
+        for (const auto& drone : drones) {
+            if (drone->getIsPrimary() && drone->getIsActive()) {
+                glColor3f(0.0f, 1.0f, 0.0f);
+                std::ostringstream primaryInfo;
+                primaryInfo << "Primary Drone: " << drone->getIdString();
+                primaryInfo << " | Pos: (" << std::fixed << std::setprecision(1) 
+                           << drone->getPosition().x << ", " 
+                           << drone->getPosition().y << ", " 
+                           << drone->getPosition().z << ")";
+                primaryInfo << " | Speed: " << std::setprecision(1) << drone->getSpeed() << " m/s";
+                drawText(10, 650, primaryInfo.str(), GLUT_BITMAP_HELVETICA_10);
+                break;
+            }
+        }
+        
+        // Current collision info
+        if (!currentCollisions.empty()) {
+            float notifX = 1280 - 300;
             float notifY = 650;
             
             glBegin(GL_QUADS);
             glColor4f(0.3f, 0.0f, 0.0f, 0.8f);
-            glVertex2f(notifX, notifY + 40);
-            glVertex2f(notifX + 210, notifY + 40);
-            glVertex2f(notifX + 210, notifY);
+            glVertex2f(notifX, notifY + 50);
+            glVertex2f(notifX + 290, notifY + 50);
+            glVertex2f(notifX + 290, notifY);
             glVertex2f(notifX, notifY);
             glEnd();
             
             glColor3f(1.0f, 0.5f, 0.5f);
-            drawText(notifX + 10, notifY + 25, "CONFLICT ALERT!", GLUT_BITMAP_HELVETICA_12);
+            drawText(notifX + 10, notifY + 35, "ACTIVE COLLISION ALERT!", GLUT_BITMAP_HELVETICA_12);
             
+            // Show first collision details
+            const auto& collision = currentCollisions[0];
             glColor3f(1.0f, 1.0f, 1.0f);
-            std::ostringstream conflictMsg;
-            conflictMsg << conflicts.size() << " active conflict(s)";
-            drawText(notifX + 10, notifY + 10, conflictMsg.str(), GLUT_BITMAP_HELVETICA_10);
+            std::ostringstream collisionMsg;
+            collisionMsg << "Primary vs " << collision.conflicting_drone_id;
+            drawText(notifX + 10, notifY + 20, collisionMsg.str(), GLUT_BITMAP_HELVETICA_10);
+            
+            std::ostringstream detailMsg;
+            detailMsg << "Distance: " << std::fixed << std::setprecision(1) << collision.distance << "m";
+            detailMsg << " | Severity: " << collision.severity;
+            drawText(notifX + 10, notifY + 10, detailMsg.str(), GLUT_BITMAP_HELVETICA_10);
         }
+        
+        // Controls hint at bottom
+        glColor4f(1.0f, 1.0f, 1.0f, 0.6f);
+        drawText(10, 15, "[H] HUD  [G] Grid  [T] Trails  [C] Collisions  [L] Trajectories  [B] Labels", GLUT_BITMAP_HELVETICA_10);
+        drawText(10, 5, "[Mouse] Rotate/Zoom  [Wheel] Zoom  [1-4] Speed  [R] Reset  [S] Status", GLUT_BITMAP_HELVETICA_10);
         
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
@@ -1395,7 +1691,8 @@ public:
           cameraAngleY(-45.0f), cameraDistance(1000.0f),
           cameraTarget(0, 0, 150), frameCount(0), fpsTimer(0), currentFPS(0),
           zoomVelocity(0), rotVelocityX(0), rotVelocityY(0),
-          currentScenario(1), timeScale(1.0f), currentTrajectoryFile("No file loaded") {}
+          currentScenario(1), timeScale(1.0f), 
+          currentTrajectoryFile("No file loaded"), currentAnalysisFile("") {}
     
     void initialize() {
         displayCache.initialize();
@@ -1426,7 +1723,8 @@ public:
     }
     
     void render(const std::vector<std::unique_ptr<Drone>>& drones, 
-                const ConflictDetector& detector, float simTime, float deltaTime) {
+                const JSONCollisionLoader& collisionLoader, 
+                float simTime, float deltaTime) {
         // Update FPS
         frameCount++;
         fpsTimer += deltaTime;
@@ -1490,20 +1788,11 @@ public:
             }
         }
         
-        // Draw conflict zones (limit to closest conflicts for performance)
+        // Draw collision zones (from JSON file)
         if (showConflicts) {
-            const auto& conflicts = detector.getConflicts();
-            int conflictCount = 0;
-            for (const auto& conflict : conflicts) {
-                if (conflictCount++ > 50) break; // Limit visualization
-                drawConflictZone(conflict, false);
-            }
-            
-            const auto& predictions = detector.getPredictions();
-            int predictionCount = 0;
-            for (const auto& prediction : predictions) {
-                if (predictionCount++ > 30) break;
-                drawConflictZone(prediction, true);
+            auto collisions = collisionLoader.getAllCollisions();
+            for (const auto& collision : collisions) {
+                drawCollisionZone(collision, simTime);
             }
         }
         
@@ -1514,15 +1803,33 @@ public:
         GLfloat lightPos0[] = {cameraPos.x, cameraPos.y, cameraPos.z + 500.0f, 1.0f};
         glLightfv(GL_LIGHT0, GL_POSITION, lightPos0);
         
+        // Draw drones (draw primary drone last so it's on top)
+        std::vector<const Drone*> regularDrones;
+        const Drone* primaryDrone = nullptr;
+        
         for (const auto& drone : drones) {
             if (drone->getIsActive()) {
-                drawDrone(*drone, cameraPos);
+                if (drone->getIsPrimary()) {
+                    primaryDrone = drone.get();
+                } else {
+                    regularDrones.push_back(drone.get());
+                }
             }
+        }
+        
+        // Draw regular drones first
+        for (const auto& drone : regularDrones) {
+            drawDrone(*drone, cameraPos);
+        }
+        
+        // Draw primary drone last (so it's always visible)
+        if (primaryDrone) {
+            drawDrone(*primaryDrone, cameraPos);
         }
         
         // Draw HUD
         if (showHUD) {
-            drawHUD(drones, detector, simTime);
+            drawHUD(drones, collisionLoader, simTime);
         }
         
         glutSwapBuffers();
@@ -1565,6 +1872,9 @@ public:
     void setTrajectoryFile(const std::string& filename) { 
         currentTrajectoryFile = filename; 
     }
+    void setAnalysisFile(const std::string& filename) { 
+        currentAnalysisFile = filename; 
+    }
 };
 
 // ============================================================================
@@ -1586,7 +1896,8 @@ public:
     
     bool loadFromJSON(const std::string& filename, 
                      std::vector<std::unique_ptr<Drone>>& drones,
-                     int maxDrones = Config::MAX_DRONES) {
+                     int maxDrones = Config::MAX_DRONES,
+                     bool loadPrimary = false) {
         std::ifstream file(filename);
         if (!file.is_open()) {
             std::cerr << "Error: Could not open JSON file: " << filename << std::endl;
@@ -1597,90 +1908,117 @@ public:
             json root;
             file >> root;
             
-            // Get metadata
-            json metadata = root["metadata"];
-            int totalDrones = metadata["num_drones"].get<int>();
-            float totalTime = metadata["total_time"].get<float>();
-            float timeStep = metadata["time_step"].get<float>();
-            
-            std::cout << "Loading " << totalDrones << " drones from JSON..." << std::endl;
-            std::cout << "Total time: " << totalTime << "s, Time step: " << timeStep << "s" << std::endl;
-            
-            // Limit number of drones for performance
-            int dronesToLoad = std::min(totalDrones, maxDrones);
-            
-            // Load drones
-            json jsonDrones = root["drones"];
-            int loadedCount = 0;
-            
-            for (int i = 0; i < dronesToLoad && i < jsonDrones.size(); i++) {
-                json droneData = jsonDrones[i];
-                std::string droneId = droneData["id"].get<std::string>();
+            // Check if this is a primary drone file or regular drone file
+            if (root.is_object() && root.contains("id") && 
+                root["id"].get<std::string>() == "primary_drone") {
+                // Load primary drone
+                if (!loadPrimary) return false; // Not loading primary drones in this call
                 
-                auto drone = std::make_unique<Drone>(i, randomColor());
+                std::cout << "Loading primary drone from: " << filename << std::endl;
+                
+                auto drone = std::make_unique<Drone>(0, Config::PRIMARY_DRONE_COLOR(), true);
                 
                 Trajectory traj;
-                json waypoints = droneData["waypoints"];
+                json waypoints = root["waypoints"];
                 
-                // **CRITICAL FIX: Proper waypoint sampling**
-                int wpCount = waypoints.size();
-                
-                // Calculate optimal sampling - about 200 waypoints max per drone
-                int targetWaypoints = 200;  // Maximum waypoints per drone for performance
-                int sampleStep = std::max(1, wpCount / targetWaypoints);
-                
-                std::cout << "Drone " << i+1 << ": " << wpCount << " waypoints, sampling every " 
-                         << sampleStep << " waypoints" << std::endl;
-                
-                for (int w = 0; w < wpCount; w += sampleStep) {
-                    const auto& wp = waypoints[w];
+                // Load all waypoints for primary drone
+                for (const auto& wp : waypoints) {
                     float time = wp["time"].get<float>();
                     float x = wp["x"].get<float>();
                     float y = wp["y"].get<float>();
                     float z = wp["z"].get<float>();
                     
-                    // Use smaller arrival radius for sampled waypoints
-                    float arrivalRadius = timeStep * sampleStep * 5.0f;
-                    traj.addWaypoint(Waypoint(Vector3D(x, y, z), time, arrivalRadius));
+                    // Primary drone uses precise waypoints
+                    traj.addWaypoint(Waypoint(Vector3D(x, y, z), time, 1.0f));
                 }
                 
-                // Ensure last waypoint is included
-                if (!waypoints.empty()) {
-                    const auto& lastWp = waypoints[wpCount - 1];
-                    float time = lastWp["time"].get<float>();
-                    float x = lastWp["x"].get<float>();
-                    float y = lastWp["y"].get<float>();
-                    float z = lastWp["z"].get<float>();
-                    float arrivalRadius = timeStep * 5.0f;
+                drone->setTrajectory(traj, true);
+                drones.insert(drones.begin(), std::move(drone)); // Insert at beginning
+                std::cout << "Primary drone loaded with " << waypoints.size() << " waypoints" << std::endl;
+                return true;
+            } else {
+                // Load regular drones from drone_waypoints.json
+                if (loadPrimary) return false; // Not loading regular drones in this call
+                
+                // Get metadata
+                json metadata = root["metadata"];
+                int totalDrones = metadata["num_drones"].get<int>();
+                float totalTime = metadata["total_time"].get<float>();
+                float timeStep = metadata["time_step"].get<float>();
+                
+                std::cout << "Loading " << totalDrones << " drones from JSON..." << std::endl;
+                std::cout << "Total time: " << totalTime << "s, Time step: " << timeStep << "s" << std::endl;
+                
+                // Limit number of drones for performance
+                int dronesToLoad = std::min(totalDrones, maxDrones);
+                
+                // Load drones
+                json jsonDrones = root["drones"];
+                int loadedCount = 0;
+                
+                for (int i = 0; i < dronesToLoad && i < jsonDrones.size(); i++) {
+                    json droneData = jsonDrones[i];
+                    std::string droneId = droneData["id"].get<std::string>();
                     
-                    // Check if last waypoint wasn't already added
-                    if ((wpCount - 1) % sampleStep != 0) {
+                    // Extract drone number from ID (e.g., "drone_4" -> 4)
+                    int droneNum = 0;
+                    if (droneId.find("drone_") != std::string::npos) {
+                        droneNum = std::stoi(droneId.substr(6));
+                    }
+                    
+                    auto drone = std::make_unique<Drone>(droneNum, randomColor(), false);
+                    
+                    Trajectory traj;
+                    json waypoints = droneData["waypoints"];
+                    
+                    // Calculate optimal sampling - about 200 waypoints max per drone
+                    int wpCount = waypoints.size();
+                    int targetWaypoints = 200;  // Maximum waypoints per drone for performance
+                    int sampleStep = std::max(1, wpCount / targetWaypoints);
+                    
+                    if (i < 5) { // Only print for first few drones
+                        std::cout << "Drone " << droneId << ": " << wpCount << " waypoints, sampling every " 
+                                 << sampleStep << " waypoints" << std::endl;
+                    }
+                    
+                    for (int w = 0; w < wpCount; w += sampleStep) {
+                        const auto& wp = waypoints[w];
+                        float time = wp["time"].get<float>();
+                        float x = wp["x"].get<float>();
+                        float y = wp["y"].get<float>();
+                        float z = wp["z"].get<float>();
+                        
+                        float arrivalRadius = timeStep * sampleStep * 5.0f;
                         traj.addWaypoint(Waypoint(Vector3D(x, y, z), time, arrivalRadius));
+                    }
+                    
+                    // Ensure last waypoint is included
+                    if (!waypoints.empty()) {
+                        const auto& lastWp = waypoints[wpCount - 1];
+                        float time = lastWp["time"].get<float>();
+                        float x = lastWp["x"].get<float>();
+                        float y = lastWp["y"].get<float>();
+                        float z = lastWp["z"].get<float>();
+                        float arrivalRadius = timeStep * 5.0f;
+                        
+                        if ((wpCount - 1) % sampleStep != 0) {
+                            traj.addWaypoint(Waypoint(Vector3D(x, y, z), time, arrivalRadius));
+                        }
+                    }
+                    
+                    drone->setTrajectory(traj, true);
+                    drones.push_back(std::move(drone));
+                    loadedCount++;
+                    
+                    // Progress update
+                    if (loadedCount % 10 == 0) {
+                        std::cout << "Loaded " << loadedCount << " drones..." << std::endl;
                     }
                 }
                 
-                drone->setTrajectory(traj, true); // Use precise trajectory mode
-                drones.push_back(std::move(drone));
-                loadedCount++;
-                
-                // Progress update
-                if (loadedCount % 10 == 0) {
-                    std::cout << "Loaded " << loadedCount << " drones..." << std::endl;
-                }
-                
-                // Early exit if taking too long
-                if (loadedCount >= 100 && loadedCount % 100 == 0) {
-                    std::cout << "Loaded " << loadedCount << " drones so far. Continue? (y/n): ";
-                    char response;
-                    std::cin >> response;
-                    if (response != 'y' && response != 'Y') break;
-                }
+                std::cout << "Successfully loaded " << loadedCount << " regular drones from JSON." << std::endl;
+                return true;
             }
-            
-            std::cout << "Successfully loaded " << loadedCount << " drones from JSON." << std::endl;
-            std::cout << "Total waypoints loaded: ~" << (loadedCount * 200) << " (sampled from " 
-                     << (loadedCount * 2001) << ")" << std::endl;
-            return true;
         }
         catch (const json::exception& e) {
             std::cerr << "Error: JSON parsing error: " << e.what() << std::endl;
@@ -1694,12 +2032,12 @@ public:
 };
 
 // ============================================================================
-// Enhanced Simulation Controller
+// Enhanced Simulation Controller with JSON Collision Loading
 // ============================================================================
 class Simulation {
 private:
     std::vector<std::unique_ptr<Drone>> drones;
-    ConflictDetector detector;
+    JSONCollisionLoader collisionLoader;
     OpenGLRenderer renderer;
     JSONTrajectoryLoader trajectoryLoader;
     float simulationTime;
@@ -1708,6 +2046,7 @@ private:
     int droneCount;
     float lastFrameTime;
     std::string currentTrajectoryFile;
+    std::string currentAnalysisFile;
     
     // For random colors
     std::mt19937 rng;
@@ -1718,38 +2057,100 @@ private:
     }
     
 public:
-    Simulation(const std::string& jsonFile = "") 
+    Simulation(const std::string& droneFile = "", 
+               const std::string& primaryFile = "",
+               const std::string& analysisFile = "") 
         : simulationTime(0), timeScale(1.0f), isPaused(false), 
-          droneCount(0), lastFrameTime(0), currentTrajectoryFile(jsonFile) {
+          droneCount(0), lastFrameTime(0), 
+          currentTrajectoryFile(droneFile),
+          currentAnalysisFile(analysisFile) {
+        
         rng.seed(std::chrono::system_clock::now().time_since_epoch().count());
         renderer.initialize();
         renderer.setTimeScale(timeScale);
         
-        if (!jsonFile.empty()) {
-            loadJSONTrajectory(jsonFile);
-        } else {
-            // Start with no drones - empty simulation
-            std::cout << "No JSON file specified. Simulation started with 0 drones." << std::endl;
-            std::cout << "Press 'N' to load a JSON trajectory file." << std::endl;
-            renderer.setTrajectoryFile("No trajectory loaded");
+        // Load primary drone first
+        if (!primaryFile.empty()) {
+            if (trajectoryLoader.loadFromJSON(primaryFile, drones, 1, true)) {
+                std::cout << "✓ Primary drone loaded from: " << primaryFile << std::endl;
+                renderer.setTrajectoryFile("Primary: " + primaryFile);
+            } else {
+                std::cout << "✗ Failed to load primary drone from: " << primaryFile << std::endl;
+            }
         }
+        
+        // Load regular drones
+        if (!droneFile.empty()) {
+            if (trajectoryLoader.loadFromJSON(droneFile, drones, Config::MAX_DRONES, false)) {
+                droneCount = drones.size();
+                if (!primaryFile.empty()) droneCount--; // Don't count primary drone
+                renderer.setTrajectoryFile("Drones: " + droneFile);
+                std::cout << "✓ Regular drones loaded from: " << droneFile << std::endl;
+            } else {
+                std::cout << "✗ Failed to load regular drones from: " << droneFile << std::endl;
+            }
+        }
+        
+        // Load collision analysis
+        if (!analysisFile.empty()) {
+            if (collisionLoader.loadFromJSON(analysisFile)) {
+                renderer.setAnalysisFile(analysisFile);
+                std::cout << "✓ Collision analysis loaded from: " << analysisFile << std::endl;
+            } else {
+                std::cout << "✗ Failed to load collision analysis from: " << analysisFile << std::endl;
+            }
+        }
+        
+        std::cout << "\nTotal drones in simulation: " << drones.size() << std::endl;
+        std::cout << "Primary drone: " << (drones.empty() ? "No" : (drones[0]->getIsPrimary() ? "Yes" : "No")) << std::endl;
     }
     
-    bool loadJSONTrajectory(const std::string& filename) {
+    bool loadDroneTrajectory(const std::string& filename) {
         currentTrajectoryFile = filename;
-        drones.clear();  // Clear any existing drones
         
-        if (trajectoryLoader.loadFromJSON(filename, drones)) {
+        // Remove all non-primary drones
+        auto it = std::remove_if(drones.begin(), drones.end(), 
+            [](const std::unique_ptr<Drone>& d) { return !d->getIsPrimary(); });
+        drones.erase(it, drones.end());
+        
+        if (trajectoryLoader.loadFromJSON(filename, drones, Config::MAX_DRONES, false)) {
             droneCount = drones.size();
-            renderer.setTrajectoryFile(filename);
-            std::cout << "Loaded trajectory from: " << filename << std::endl;
-            std::cout << "Number of drones: " << drones.size() << std::endl;
+            // Find primary drone
+            for (const auto& drone : drones) {
+                if (drone->getIsPrimary()) {
+                    droneCount--; // Don't count primary drone
+                    break;
+                }
+            }
+            renderer.setTrajectoryFile("Drones: " + filename);
+            std::cout << "Loaded drone trajectories from: " << filename << std::endl;
             return true;
         }
+        return false;
+    }
+    
+    bool loadPrimaryTrajectory(const std::string& filename) {
+        // Remove existing primary drone if any
+        auto it = std::remove_if(drones.begin(), drones.end(), 
+            [](const std::unique_ptr<Drone>& d) { return d->getIsPrimary(); });
+        drones.erase(it, drones.end());
         
-        // If loading fails, keep empty simulation
-        std::cout << "Failed to load trajectory from: " << filename << std::endl;
-        renderer.setTrajectoryFile("Load failed: " + filename);
+        // Insert primary drone at beginning
+        if (trajectoryLoader.loadFromJSON(filename, drones, 1, true)) {
+            renderer.setTrajectoryFile("Primary: " + filename);
+            std::cout << "Loaded primary drone from: " << filename << std::endl;
+            return true;
+        }
+        return false;
+    }
+    
+    bool loadCollisionAnalysis(const std::string& filename) {
+        currentAnalysisFile = filename;
+        if (collisionLoader.loadFromJSON(filename)) {
+            renderer.setAnalysisFile(filename);
+            std::cout << "Loaded collision analysis from: " << filename << std::endl;
+            return true;
+        }
         return false;
     }
     
@@ -1759,45 +2160,86 @@ public:
         float scaledDelta = deltaTime * timeScale;
         simulationTime += scaledDelta;
         
+        // Check if simulation reached 200 seconds
+        float totalDuration = 200.0f; // From JSON file
+        
+        if (simulationTime >= totalDuration) {
+            // Reset simulation time
+            simulationTime = 0.0f;
+            
+            // Reset all drones
+            for (auto& drone : drones) {
+                drone->reset();
+            }
+            
+            std::cout << "🔄 Simulation restarted at 0s (200s reached)" << std::endl;
+        }
+        
         // Update all drones
         for (auto& drone : drones) {
             drone->update(scaledDelta);
         }
         
-        // Check conflicts only if we have drones
-        if (!drones.empty()) {
-            detector.checkForConflicts(drones, simulationTime);
-            
-            // Update drone colors based on conflicts
-            for (auto& drone : drones) {
-                drone->resetColor();
-            }
-            
-            const auto& conflicts = detector.getConflicts();
-            for (const auto& conflict : conflicts) {
-                for (auto& drone : drones) {
-                    if (drone->getId() == conflict.droneIds.first || 
-                        drone->getId() == conflict.droneIds.second) {
-                        drone->setColor(Vector3D(1, 0.3f, 0));
-                    }
+        // Update drone colors based on collisions from analysis file
+        auto currentCollisions = collisionLoader.getCollisionsAtTime(simulationTime, 1.0f);
+        
+        // Reset all drone colors first
+        for (auto& drone : drones) {
+            drone->resetColor();
+        }
+        
+        // Color drones involved in current collisions
+        for (const auto& collision : currentCollisions) {
+            // Extract drone number from conflicting_drone_id (e.g., "drone_4" -> 4)
+            int droneNum = 0;
+            if (collision.conflicting_drone_id.find("drone_") != std::string::npos) {
+                try {
+                    droneNum = std::stoi(collision.conflicting_drone_id.substr(6));
+                } catch (...) {
+                    continue;
                 }
             }
             
-            const auto& predictions = detector.getPredictions();
-            for (const auto& prediction : predictions) {
-                for (auto& drone : drones) {
-                    if ((drone->getId() == prediction.droneIds.first || 
-                         drone->getId() == prediction.droneIds.second) &&
-                        drone->getColor().x < 0.9f) {
-                        drone->setColor(Vector3D(1, 0.7f, 0));
+            // Color the conflicting drone based on severity
+            for (auto& drone : drones) {
+                if (drone->getId() == droneNum && !drone->getIsPrimary()) {
+                    if (collision.severity == "HIGH") {
+                        drone->setColor(Vector3D(1, 0.2f, 0));
+                    } else if (collision.severity == "MEDIUM") {
+                        drone->setColor(Vector3D(1, 0.6f, 0));
+                    } else { // LOW
+                        drone->setColor(Vector3D(1, 0.9f, 0));
                     }
+                    break;
+                }
+            }
+        }
+        
+        // Color drones with upcoming collisions (within 5 seconds)
+        auto upcomingCollisions = collisionLoader.getCollisionsAtTime(simulationTime + 5.0f, 2.5f);
+        for (const auto& collision : upcomingCollisions) {
+            int droneNum = 0;
+            if (collision.conflicting_drone_id.find("drone_") != std::string::npos) {
+                try {
+                    droneNum = std::stoi(collision.conflicting_drone_id.substr(6));
+                } catch (...) {
+                    continue;
+                }
+            }
+            
+            // Color the conflicting drone yellow for warning
+            for (auto& drone : drones) {
+                if (drone->getId() == droneNum && !drone->getIsPrimary() && 
+                    drone->getColor().x < 0.9f) { // Not already colored red/orange
+                    drone->setColor(Vector3D(1, 1, 0.3f));
+                    break;
                 }
             }
         }
     }
     
     void render(float deltaTime) {
-        renderer.render(drones, detector, simulationTime, deltaTime);
+        renderer.render(drones, collisionLoader, simulationTime, deltaTime);
     }
     
     void reset() {
@@ -1805,21 +2247,6 @@ public:
         for (auto& drone : drones) {
             drone->reset();
         }
-    }
-    
-    void setDroneCount(int count) {
-        droneCount = std::max(10, std::min(Config::MAX_DRONES, count));
-        if (!currentTrajectoryFile.empty()) {
-            loadJSONTrajectory(currentTrajectoryFile);
-        }
-    }
-    
-    void increaseDrones() {
-        setDroneCount(droneCount + 50);
-    }
-    
-    void decreaseDrones() {
-        setDroneCount(std::max(10, droneCount - 50));
     }
     
     void togglePause() { isPaused = !isPaused; }
@@ -1838,23 +2265,69 @@ public:
     void toggleHUD() { renderer.toggleHUD(); }
     void toggleLabels() { renderer.toggleLabels(); }
     
-    bool loadTrajectoryFile(const std::string& filename) {
-        return loadJSONTrajectory(filename);
-    }
-    
     float getSimulationTime() const { return simulationTime; }
     bool getIsPaused() const { return isPaused; }
     int getDroneCount() const { return droneCount; }
     
     void printStatus() {
+        auto collisions = collisionLoader.getAllCollisions();
+        auto currentCollisions = collisionLoader.getCollisionsAtTime(simulationTime, 1.0f);
+        
         std::cout << "\n========================================" << std::endl;
         std::cout << "SIMULATION STATUS" << std::endl;
         std::cout << "========================================" << std::endl;
         std::cout << "Time: " << std::fixed << std::setprecision(2) << simulationTime << "s" << std::endl;
-        std::cout << "Drones: " << drones.size() << std::endl;
-        std::cout << "Active Conflicts: " << detector.getConflicts().size() << std::endl;
-        std::cout << "Predicted Conflicts: " << detector.getPredictions().size() << std::endl;
-        std::cout << "Trajectory File: " << currentTrajectoryFile << std::endl;
+        std::cout << "Total Drones: " << drones.size() << std::endl;
+        
+        // Count primary vs regular drones
+        int primaryCount = 0;
+        for (const auto& drone : drones) {
+            if (drone->getIsPrimary()) primaryCount++;
+        }
+        std::cout << "  Primary: " << primaryCount << std::endl;
+        std::cout << "  Regular: " << (drones.size() - primaryCount) << std::endl;
+        
+        std::cout << "Collision Analysis: " << currentAnalysisFile << std::endl;
+        std::cout << "Total Collisions in Analysis: " << collisions.size() << std::endl;
+        std::cout << "Active Collisions (now ±1s): " << currentCollisions.size() << std::endl;
+        
+        // Print primary drone info
+        for (const auto& drone : drones) {
+            if (drone->getIsPrimary()) {
+                auto pos = drone->getPosition();
+                std::cout << "\nPrimary Drone:" << std::endl;
+                std::cout << "  Position: (" << std::fixed << std::setprecision(1) 
+                         << pos.x << ", " << pos.y << ", " << pos.z << ")" << std::endl;
+                std::cout << "  Speed: " << std::setprecision(1) << drone->getSpeed() << " m/s" << std::endl;
+                break;
+            }
+        }
+        
+        // Print current collisions
+        if (!currentCollisions.empty()) {
+            std::cout << "\nCurrent Collisions:" << std::endl;
+            for (const auto& collision : currentCollisions) {
+                std::cout << "  " << collision.primary_drone_id << " <-> " 
+                         << collision.conflicting_drone_id 
+                         << " at t=" << std::fixed << std::setprecision(1) << collision.time << "s" 
+                         << ", distance=" << std::setprecision(2) << collision.distance << "m"
+                         << ", severity=" << collision.severity << std::endl;
+            }
+        }
+        
+        // Count collisions by severity
+        std::map<std::string, int> severityCount;
+        for (const auto& c : collisions) {
+            severityCount[c.severity]++;
+        }
+        
+        if (!severityCount.empty()) {
+            std::cout << "\nCollisions by Severity:" << std::endl;
+            for (const auto& [severity, count] : severityCount) {
+                std::cout << "  " << severity << ": " << count << std::endl;
+            }
+        }
+        
         std::cout << "========================================\n" << std::endl;
     }
 };
@@ -1909,11 +2382,36 @@ void keyboard(unsigned char key, int x, int y) {
         case 'n':
         case 'N':
             {
-                char filename[256];
-                std::cout << "Enter JSON trajectory file path: ";
-                std::cin.getline(filename, 256);
-                if (!simulation->loadTrajectoryFile(filename)) {
-                    std::cout << "Failed to load trajectory file." << std::endl;
+                std::string filename;
+                std::cout << "Enter JSON drone trajectory file path: ";
+                std::cin.ignore(); // Clear input buffer
+                std::getline(std::cin, filename);
+                if (!simulation->loadDroneTrajectory(filename)) {
+                    std::cout << "Failed to load drone trajectory file." << std::endl;
+                }
+            }
+            break;
+        case 'p':
+        case 'P':
+            {
+                std::string filename;
+                std::cout << "Enter JSON primary drone trajectory file path: ";
+                std::cin.ignore();
+                std::getline(std::cin, filename);
+                if (!simulation->loadPrimaryTrajectory(filename)) {
+                    std::cout << "Failed to load primary drone trajectory file." << std::endl;
+                }
+            }
+            break;
+        case 'a':
+        case 'A':
+            {
+                std::string filename;
+                std::cout << "Enter JSON collision analysis file path: ";
+                std::cin.ignore();
+                std::getline(std::cin, filename);
+                if (!simulation->loadCollisionAnalysis(filename)) {
+                    std::cout << "Failed to load collision analysis file." << std::endl;
                 }
             }
             break;
@@ -1923,7 +2421,7 @@ void keyboard(unsigned char key, int x, int y) {
             break;
         case 't':
         case 'T':
-            simulation->toggleTrajectories();
+            simulation->toggleTrails();
             break;
         case 'c':
         case 'C':
@@ -1931,7 +2429,7 @@ void keyboard(unsigned char key, int x, int y) {
             break;
         case 'l':
         case 'L':
-            simulation->toggleTrails();
+            simulation->toggleTrajectories();
             break;
         case 'h':
         case 'H':
@@ -1962,23 +2460,9 @@ void keyboard(unsigned char key, int x, int y) {
             simulation->setTimeScale(5.0f);
             std::cout << "Speed: 5.0x" << std::endl;
             break;
-        case '+':
-        case '=':
-            simulation->increaseDrones();
-            std::cout << "Drones: " << simulation->getDroneCount() << std::endl;
-            break;
-        case '-':
-        case '_':
-            simulation->decreaseDrones();
-            std::cout << "Drones: " << simulation->getDroneCount() << std::endl;
-            break;
         case 's':
         case 'S':
             simulation->printStatus();
-            break;
-        case 'f':
-        case 'F':
-            std::cout << "FPS counter toggled" << std::endl;
             break;
     }
     glutPostRedisplay();
@@ -2042,7 +2526,7 @@ void motion(int x, int y) {
 
 void printInstructions() {
     std::cout << "\n╔══════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║  UAV DECONFLICTION SYSTEM - JSON TRAJECTORY LOADER       ║" << std::endl;
+    std::cout << "║  UAV DECONFLICTION SYSTEM - JSON COLLISION VISUALIZER     ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
     std::cout << "\n📋 ENHANCED CONTROLS:" << std::endl;
     std::cout << "  ┌─ Camera Controls ─────────────────────────────────────" << std::endl;
@@ -2056,24 +2540,29 @@ void printInstructions() {
     std::cout << "\n🎮 SIMULATION CONTROLS:" << std::endl;
     std::cout << "  │ SPACE             Pause/Resume simulation" << std::endl;
     std::cout << "  │ R                 Reset simulation" << std::endl;
-    std::cout << "  │ N                 Load new JSON trajectory file" << std::endl;
+    std::cout << "  │ N                 Load new JSON drone trajectory file" << std::endl;
+    std::cout << "  │ P                 Load new JSON primary drone trajectory" << std::endl;
+    std::cout << "  │ A                 Load new JSON collision analysis file" << std::endl;
     std::cout << "  │ 1-4               Set simulation speed (0.5x to 5x)" << std::endl;
-    std::cout << "  │ +/-               Increase/Decrease number of drones" << std::endl;
     std::cout << "  │ S                 Print simulation status" << std::endl;
     std::cout << "  └───────────────────────────────────────────────────────" << std::endl;
     std::cout << "\n🔧 VISUALIZATION TOGGLES:" << std::endl;
     std::cout << "  │ G                 Toggle grid" << std::endl;
     std::cout << "  │ T                 Toggle trails" << std::endl;
-    std::cout << "  │ C                 Toggle conflict zones" << std::endl;
+    std::cout << "  │ C                 Toggle collision zones" << std::endl;
     std::cout << "  │ L                 Toggle trajectory lines" << std::endl;
     std::cout << "  │ H                 Toggle HUD" << std::endl;
     std::cout << "  │ B                 Toggle drone labels" << std::endl;
     std::cout << "  └───────────────────────────────────────────────────────" << std::endl;
-    std::cout << "\n📁 JSON TRAJECTORY FORMAT:" << std::endl;
-    std::cout << "  The system expects JSON files with the following structure:" << std::endl;
-    std::cout << "  - metadata: Contains num_drones, total_time, time_step, bounds" << std::endl;
-    std::cout << "  - drones: Array of drone objects with id and waypoints arrays" << std::endl;
-    std::cout << "  - waypoints: Arrays of {time, x, y, z} objects" << std::endl;
+    std::cout << "\n📁 FILE LOADING:" << std::endl;
+    std::cout << "  1. Primary Drone:   /home/arka/Trajectra/waypoint_generation/primary_waypoint.json" << std::endl;
+    std::cout << "  2. Regular Drones:  /home/arka/Trajectra/waypoint_generation/drone_waypoints.json" << std::endl;
+    std::cout << "  3. Collision Data:  /home/arka/Trajectra/trajectory_control/detailed_analysis.json" << std::endl;
+    std::cout << "\n⚠ FEATURES:" << std::endl;
+    std::cout << "  • Primary drone highlighted in GREEN with pulsing glow" << std::endl;
+    std::cout << "  • Collision zones shown based on JSON analysis data" << std::endl;
+    std::cout << "  • Drones change color when involved in collisions" << std::endl;
+    std::cout << "  • Real-time collision warnings in HUD" << std::endl;
     std::cout << "\n═══════════════════════════════════════════════════════════════\n" << std::endl;
 }
 
@@ -2081,18 +2570,22 @@ void printInstructions() {
 // Main Function
 // ============================================================================
 int main(int argc, char** argv) {
-    // Hardcoded JSON file path
-    std::string jsonFile = "/home/arka/Trajectra/waypoint_generation/drone_waypoints.json";
+    // Hardcoded file paths
+    std::string droneFile = "/home/arka/Trajectra/waypoint_generation/drone_waypoints.json";
+    std::string primaryFile = "/home/arka/Trajectra/waypoint_generation/primary_waypoint.json";
+    std::string analysisFile = "/home/arka/Trajectra/trajectory_control/detailed_analysis.json";
     
-    std::cout << "Loading trajectory from: " << jsonFile << std::endl;
-    std::cout << "If the file doesn't exist, the simulation will start empty." << std::endl;
-    std::cout << "Press 'N' to load a different JSON file during simulation." << std::endl;
+    std::cout << "Starting UAV Deconfliction Simulation..." << std::endl;
+    std::cout << "Loading files:" << std::endl;
+    std::cout << "  1. Primary drone: " << primaryFile << std::endl;
+    std::cout << "  2. Regular drones: " << droneFile << std::endl;
+    std::cout << "  3. Collision analysis: " << analysisFile << std::endl;
     
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH | GLUT_MULTISAMPLE);
     glutInitWindowSize(1280, 720);
     glutInitWindowPosition(50, 50);
-    glutCreateWindow("UAV Deconfliction System - JSON Trajectory Loader");
+    glutCreateWindow("UAV Deconfliction System - JSON Collision Visualizer");
     
     // OpenGL initialization
     glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
@@ -2126,7 +2619,8 @@ int main(int argc, char** argv) {
     glLightfv(GL_LIGHT1, GL_AMBIENT, lightAmbient);
     glLightfv(GL_LIGHT1, GL_DIFFUSE, lightDiffuse);
     
-    simulation = new Simulation(jsonFile);
+    // Create simulation with all three files
+    simulation = new Simulation(droneFile, primaryFile, analysisFile);
     
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
@@ -2140,13 +2634,18 @@ int main(int argc, char** argv) {
     
     if (simulation->getDroneCount() == 0) {
         std::cout << "\n⚠ WARNING: No drones loaded!" << std::endl;
-        std::cout << "The JSON file may not exist or may be invalid." << std::endl;
-        std::cout << "Press 'N' to load a different JSON file." << std::endl;
+        std::cout << "The JSON files may not exist or may be invalid." << std::endl;
+        std::cout << "Press 'N' to load drone trajectories manually." << std::endl;
+        std::cout << "Press 'P' to load primary drone manually." << std::endl;
+        std::cout << "Press 'A' to load collision analysis manually." << std::endl;
     } else {
-        std::cout << "\n✅ Successfully loaded " << simulation->getDroneCount() << " drones." << std::endl;
+        std::cout << "\n✅ Successfully loaded simulation!" << std::endl;
+        std::cout << "   Total drones: " << simulation->getDroneCount() << std::endl;
     }
     
-    std::cout << "Simulation starting..." << std::endl;
+    std::cout << "\n📊 Simulation starting..." << std::endl;
+    std::cout << "   Look for the GREEN primary drone!" << std::endl;
+    std::cout << "   Collision zones will appear based on analysis data." << std::endl;
     
     lastFrameTime = std::chrono::high_resolution_clock::now();
     
