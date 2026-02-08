@@ -29,6 +29,7 @@ try:
     from pygame.locals import *
     from OpenGL.GL import *
     from OpenGL.GLU import *
+    from OpenGL.GLUT import *  # Added for 3D shapes
     OPENGL_AVAILABLE = True
 except ImportError:
     print("❌ PyGame/OpenGL not installed!")
@@ -55,6 +56,50 @@ class Waypoint:
     az: float = 0.0
     id: int = 0
     
+    @classmethod
+    def from_any(cls, data):
+        """Create Waypoint from any data format"""
+        if isinstance(data, cls):
+            # Already a Waypoint object
+            return data
+        elif isinstance(data, dict):
+            # Dictionary format
+            return cls(
+                x=data.get('x', 0),
+                y=data.get('y', 0),
+                z=data.get('z', 0),
+                t=data.get('t', 0),
+                vx=data.get('vx', 0),
+                vy=data.get('vy', 0),
+                vz=data.get('vz', 0)
+            )
+        elif hasattr(data, 'x') and hasattr(data, 'y') and hasattr(data, 'z') and hasattr(data, 't'):
+            # Object with x, y, z, t attributes (like Waypoint4D)
+            return cls(
+                x=data.x,
+                y=data.y,
+                z=data.z,
+                t=data.t,
+                vx=getattr(data, 'vx', 0),
+                vy=getattr(data, 'vy', 0),
+                vz=getattr(data, 'vz', 0)
+            )
+        elif isinstance(data, (list, tuple)):
+            # Tuple/list format (x, y, z, t, ...)
+            return cls(
+                x=data[0] if len(data) > 0 else 0,
+                y=data[1] if len(data) > 1 else 0,
+                z=data[2] if len(data) > 2 else 0,
+                t=data[3] if len(data) > 3 else 0,
+                vx=data[4] if len(data) > 4 else 0,
+                vy=data[5] if len(data) > 5 else 0,
+                vz=data[6] if len(data) > 6 else 0
+            )
+        else:
+            # Unknown format, return default
+            print(f"⚠️  Warning: Unknown waypoint format: {type(data)}")
+            return cls(0, 0, 0, 0)
+    
 @dataclass 
 class Drone:
     """Drone with complete state information"""
@@ -66,6 +111,46 @@ class Drone:
     show_trajectory: bool = True
     show_labels: bool = True
     
+    @classmethod
+    def from_any(cls, drone_id: str, data: Any):
+        """Create Drone from any data format"""
+        waypoints = []
+        
+        if hasattr(data, 'waypoints'):
+            # Object with waypoints attribute
+            for wp_data in data.waypoints:
+                waypoints.append(Waypoint.from_any(wp_data))
+        elif isinstance(data, dict) and 'waypoints' in data:
+            # Dictionary with waypoints key
+            for wp_data in data['waypoints']:
+                waypoints.append(Waypoint.from_any(wp_data))
+        elif isinstance(data, (list, tuple)):
+            # Direct list of waypoints
+            for wp_data in data:
+                waypoints.append(Waypoint.from_any(wp_data))
+        else:
+            # Unknown format
+            print(f"⚠️  Warning: Unknown drone data format for {drone_id}: {type(data)}")
+        
+        # Get other properties
+        if isinstance(data, dict):
+            color = data.get('color', (0.3, 0.5, 1.0))
+            is_primary = data.get('is_primary', False)
+            radius = data.get('radius', 1.0)
+        else:
+            # Try to get attributes from object
+            color = getattr(data, 'color', (0.3, 0.5, 1.0))
+            is_primary = getattr(data, 'is_primary', False)
+            radius = getattr(data, 'radius', 1.0)
+        
+        return cls(
+            id=drone_id,
+            waypoints=waypoints,
+            color=color,
+            is_primary=is_primary,
+            radius=radius
+        )
+        
 @dataclass
 class Conflict:
     """Conflict with enhanced information"""
@@ -90,6 +175,64 @@ class Conflict:
         
         # Adjust based on number of drones
         self.risk_score *= min(1.0 + 0.2 * len(self.drones_involved), 2.0)
+    
+    @classmethod
+    def from_any(cls, data: Any):
+        """Create Conflict from any data format"""
+        if isinstance(data, cls):
+            # Already a Conflict object
+            return data
+            
+        # Initialize with defaults
+        time_val = 0
+        location_val = {'x': 0, 'y': 0, 'z': 0}
+        severity_val = 'MEDIUM'
+        drones_involved_val = []
+        distance_val = 10.0
+        type_val = 'proximity'
+        
+        if isinstance(data, dict):
+            # Dictionary format
+            time_val = data.get('time', 0)
+            severity_val = data.get('severity', 'MEDIUM')
+            drones_involved_val = data.get('drones_involved', [])
+            distance_val = data.get('distance', 10.0)
+            type_val = data.get('type', 'proximity')
+            
+            # Handle location in various formats
+            loc_data = data.get('location', {})
+            if isinstance(loc_data, dict):
+                location_val = loc_data
+            elif hasattr(loc_data, 'x') and hasattr(loc_data, 'y') and hasattr(loc_data, 'z'):
+                location_val = {'x': loc_data.x, 'y': loc_data.y, 'z': loc_data.z}
+            elif isinstance(loc_data, (list, tuple)) and len(loc_data) >= 3:
+                location_val = {'x': loc_data[0], 'y': loc_data[1], 'z': loc_data[2]}
+        else:
+            # Try to get attributes from object
+            time_val = getattr(data, 'time', 0)
+            severity_val = getattr(data, 'severity', 'MEDIUM')
+            drones_involved_val = getattr(data, 'drones_involved', [])
+            distance_val = getattr(data, 'distance', 10.0)
+            type_val = getattr(data, 'type', 'proximity')
+            
+            # Handle location
+            loc_data = getattr(data, 'location', None)
+            if loc_data:
+                if isinstance(loc_data, dict):
+                    location_val = loc_data
+                elif hasattr(loc_data, 'x') and hasattr(loc_data, 'y') and hasattr(loc_data, 'z'):
+                    location_val = {'x': loc_data.x, 'y': loc_data.y, 'z': loc_data.z}
+                elif isinstance(loc_data, (list, tuple)) and len(loc_data) >= 3:
+                    location_val = {'x': loc_data[0], 'y': loc_data[1], 'z': loc_data[2]}
+        
+        return cls(
+            time=time_val,
+            location=location_val,
+            severity=severity_val,
+            drones_involved=drones_involved_val,
+            distance=distance_val,
+            type=type_val
+        )
 
 class ViewMode(Enum):
     """Available view modes"""
@@ -145,6 +288,38 @@ class Theme(Enum):
                 'secondary': (1.0, 0.3, 0.3, 1.0),
                 'highlight': (0.3, 1.0, 0.3, 1.0)
             }
+
+# ============================================================================
+# DATA CONVERSION UTILITIES
+# ============================================================================
+
+def convert_to_drone_objects(drones_data: Dict) -> Dict[str, Drone]:
+    """Convert any drone data format to Drone objects"""
+    drones = {}
+    
+    for drone_id, data in drones_data.items():
+        if isinstance(data, Drone):
+            # Already a Drone object
+            drones[drone_id] = data
+        else:
+            # Convert from any format
+            drones[drone_id] = Drone.from_any(drone_id, data)
+    
+    return drones
+
+def convert_to_conflict_objects(conflicts_data: List) -> List[Conflict]:
+    """Convert any conflicts data format to Conflict objects"""
+    conflicts = []
+    
+    for conflict_data in conflicts_data:
+        if isinstance(conflict_data, Conflict):
+            # Already a Conflict object
+            conflicts.append(conflict_data)
+        else:
+            # Convert from any format
+            conflicts.append(Conflict.from_any(conflict_data))
+    
+    return conflicts
 
 # ============================================================================
 # PERFORMANCE OPTIMIZATIONS
@@ -429,7 +604,7 @@ class BaseViewer:
             self.last_fps_time = current_time
 
 # ============================================================================
-# ENHANCED 2D VIEWER
+# ENHANCED 2D VIEWER (UNIVERSAL)
 # ============================================================================
 
 class Interactive2DViewer(BaseViewer):
@@ -444,11 +619,12 @@ class Interactive2DViewer(BaseViewer):
     - Enhanced camera controls
     """
     
-    def __init__(self, drones_data: Dict[str, Drone], conflicts: List[Conflict] = None):
+    def __init__(self, drones_data: Dict, conflicts: List = None):
         super().__init__("2D Trajectory Viewer - Enhanced", (1600, 1000))
         
-        self.drones = drones_data
-        self.conflicts = conflicts or []
+        # Convert input data to proper objects
+        self.drones = convert_to_drone_objects(drones_data)
+        self.conflicts = convert_to_conflict_objects(conflicts or [])
         
         # View configuration
         self.view_modes = [ViewMode.XY, ViewMode.XZ, ViewMode.YZ, ViewMode.TIME_ALTITUDE]
@@ -483,10 +659,6 @@ class Interactive2DViewer(BaseViewer):
         
         # Initialize
         self.init_pygame()
-        
-        # Start data streaming thread if needed
-        self.data_streaming = False
-        self.stream_thread = None
         
         self._print_controls()
         self.run()
@@ -1082,7 +1254,6 @@ class Interactive2DViewer(BaseViewer):
                     self.hovered_point = self.screen_to_world(mouse_pos[0], mouse_pos[1], view_idx)
                     
         # Handle mouse wheel for zoom
-        wheel_moved = pygame.mouse.get_rel()
         if pygame.mouse.get_pressed()[0]:  # Left drag for pan
             mouse_rel = pygame.mouse.get_rel()
             camera = self.viewport_cameras[self.current_focus_view]
@@ -1189,7 +1360,7 @@ class Interactive2DViewer(BaseViewer):
         pygame.quit()
 
 # ============================================================================
-# ENHANCED 3D VIEWER
+# ENHANCED 3D VIEWER (UNIVERSAL)
 # ============================================================================
 
 class Interactive3DViewer(BaseViewer):
@@ -1204,11 +1375,12 @@ class Interactive3DViewer(BaseViewer):
     - Path prediction
     """
     
-    def __init__(self, drones_data: Dict[str, Drone], conflicts: List[Conflict] = None):
+    def __init__(self, drones_data: Dict, conflicts: List = None):
         super().__init__("3D Trajectory Viewer - Enhanced", (1600, 1000))
         
-        self.drones = drones_data
-        self.conflicts = conflicts or []
+        # Convert input data to proper objects
+        self.drones = convert_to_drone_objects(drones_data)
+        self.conflicts = convert_to_conflict_objects(conflicts or [])
         
         # Camera modes
         self.camera_mode = "orbit"  # orbit, fps, free
@@ -1288,70 +1460,127 @@ class Interactive3DViewer(BaseViewer):
             
     def _create_drone_model(self):
         """Create display list for drone model"""
-        self.drone_model = glGenLists(1)
-        glNewList(self.drone_model, GL_COMPILE)
-        
-        # Draw drone as a simple quadcopter
-        glPushMatrix()
-        glScalef(2, 0.5, 2)
-        
-        # Body (central cube)
-        glColor4f(0.3, 0.3, 0.3, 1.0)
-        glutSolidCube(1.0)
-        
-        # Arms
-        glColor4f(0.2, 0.2, 0.2, 1.0)
-        arm_length = 1.5
-        arm_thickness = 0.1
-        
-        # Front arm
-        glPushMatrix()
-        glTranslatef(0, 0, arm_length/2)
-        glScalef(arm_thickness, arm_thickness, arm_length)
-        glutSolidCube(1.0)
-        glPopMatrix()
-        
-        # Back arm
-        glPushMatrix()
-        glTranslatef(0, 0, -arm_length/2)
-        glScalef(arm_thickness, arm_thickness, arm_length)
-        glutSolidCube(1.0)
-        glPopMatrix()
-        
-        # Right arm
-        glPushMatrix()
-        glTranslatef(arm_length/2, 0, 0)
-        glScalef(arm_length, arm_thickness, arm_thickness)
-        glutSolidCube(1.0)
-        glPopMatrix()
-        
-        # Left arm
-        glPushMatrix()
-        glTranslatef(-arm_length/2, 0, 0)
-        glScalef(arm_length, arm_thickness, arm_thickness)
-        glutSolidCube(1.0)
-        glPopMatrix()
-        
-        # Propellers (disks at ends)
-        propeller_radius = 0.4
-        glColor4f(0.8, 0.8, 0.8, 1.0)
-        
-        positions = [
-            (arm_length/2, 0, 0),
-            (-arm_length/2, 0, 0),
-            (0, 0, arm_length/2),
-            (0, 0, -arm_length/2)
-        ]
-        
-        for pos in positions:
+        try:
+            self.drone_model = glGenLists(1)
+            glNewList(self.drone_model, GL_COMPILE)
+            
+            # Draw drone as a simple quadcopter
             glPushMatrix()
-            glTranslatef(*pos)
-            glRotatef(90, 1, 0, 0)  # Make it horizontal
-            glutSolidTorus(0.05, propeller_radius, 8, 16)
+            glScalef(2, 0.5, 2)
+            
+            # Body (central cube)
+            glColor4f(0.3, 0.3, 0.3, 1.0)
+            self.draw_cube(1.0)
+            
+            # Arms
+            glColor4f(0.2, 0.2, 0.2, 1.0)
+            arm_length = 1.5
+            arm_thickness = 0.1
+            
+            # Front arm
+            glPushMatrix()
+            glTranslatef(0, 0, arm_length/2)
+            glScalef(arm_thickness, arm_thickness, arm_length)
+            self.draw_cube(1.0)
             glPopMatrix()
             
-        glPopMatrix()
-        glEndList()
+            # Back arm
+            glPushMatrix()
+            glTranslatef(0, 0, -arm_length/2)
+            glScalef(arm_thickness, arm_thickness, arm_length)
+            self.draw_cube(1.0)
+            glPopMatrix()
+            
+            # Right arm
+            glPushMatrix()
+            glTranslatef(arm_length/2, 0, 0)
+            glScalef(arm_length, arm_thickness, arm_thickness)
+            self.draw_cube(1.0)
+            glPopMatrix()
+            
+            # Left arm
+            glPushMatrix()
+            glTranslatef(-arm_length/2, 0, 0)
+            glScalef(arm_length, arm_thickness, arm_thickness)
+            self.draw_cube(1.0)
+            glPopMatrix()
+            
+            # Propellers (disks at ends)
+            glColor4f(0.8, 0.8, 0.8, 1.0)
+            
+            positions = [
+                (arm_length/2, 0, 0),
+                (-arm_length/2, 0, 0),
+                (0, 0, arm_length/2),
+                (0, 0, -arm_length/2)
+            ]
+            
+            for pos in positions:
+                glPushMatrix()
+                glTranslatef(*pos)
+                glRotatef(90, 1, 0, 0)  # Make it horizontal
+                self.draw_torus(0.05, 0.4, 8, 16)
+                glPopMatrix()
+                
+            glPopMatrix()
+            glEndList()
+        except:
+            # Fallback if GLUT not available
+            self.drone_model = None
+            
+    def draw_cube(self, size):
+        """Draw a cube (fallback if glutSolidCube not available)"""
+        try:
+            glutSolidCube(size)
+        except:
+            # Manual cube drawing
+            s = size / 2
+            glBegin(GL_QUADS)
+            # Front
+            glVertex3f(-s, -s, s)
+            glVertex3f(s, -s, s)
+            glVertex3f(s, s, s)
+            glVertex3f(-s, s, s)
+            # Back
+            glVertex3f(-s, -s, -s)
+            glVertex3f(-s, s, -s)
+            glVertex3f(s, s, -s)
+            glVertex3f(s, -s, -s)
+            # Top
+            glVertex3f(-s, s, -s)
+            glVertex3f(-s, s, s)
+            glVertex3f(s, s, s)
+            glVertex3f(s, s, -s)
+            # Bottom
+            glVertex3f(-s, -s, -s)
+            glVertex3f(s, -s, -s)
+            glVertex3f(s, -s, s)
+            glVertex3f(-s, -s, s)
+            # Right
+            glVertex3f(s, -s, -s)
+            glVertex3f(s, s, -s)
+            glVertex3f(s, s, s)
+            glVertex3f(s, -s, s)
+            # Left
+            glVertex3f(-s, -s, -s)
+            glVertex3f(-s, -s, s)
+            glVertex3f(-s, s, s)
+            glVertex3f(-s, s, -s)
+            glEnd()
+            
+    def draw_torus(self, inner_radius, outer_radius, sides, rings):
+        """Draw a torus (fallback if glutSolidTorus not available)"""
+        try:
+            glutSolidTorus(inner_radius, outer_radius, sides, rings)
+        except:
+            # Simple circle as fallback
+            glBegin(GL_TRIANGLE_FAN)
+            for i in range(32):
+                angle = 2 * math.pi * i / 32
+                glVertex3f(outer_radius * math.cos(angle), 
+                          outer_radius * math.sin(angle), 
+                          0)
+            glEnd()
         
     def _print_controls(self):
         """Print control instructions"""
@@ -1437,23 +1666,6 @@ class Interactive3DViewer(BaseViewer):
         glVertex3f(0, 0, length)
         
         glEnd()
-        
-        # Draw labels
-        self.draw_3d_text("X", [length + 2, 0, 0], (1, 0, 0))
-        self.draw_3d_text("Y", [0, length + 2, 0], (0, 1, 0))
-        self.draw_3d_text("Z", [0, 0, length + 2], (0, 0, 1))
-        
-        glEnable(GL_LIGHTING)
-        
-    def draw_3d_text(self, text, position, color):
-        """Draw text in 3D space"""
-        glDisable(GL_LIGHTING)
-        glColor3f(*color)
-        
-        glRasterPos3f(*position)
-        for char in text:
-            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, ord(char))
-            
         glEnable(GL_LIGHTING)
         
     def draw_grid(self):
@@ -1490,20 +1702,89 @@ class Interactive3DViewer(BaseViewer):
         color = drone.color if drone.is_primary else self.colors['primary']
         glColor4f(*color)
         
-        if self.show_drone_models:
+        if self.show_drone_models and self.drone_model:
             glCallList(self.drone_model)
         else:
             # Draw simple sphere
-            glutSolidSphere(drone.radius, 16, 16)
+            self.draw_sphere(drone.radius, 16, 16)
             
         # Draw collision volume
         if self.show_collision_volumes:
             glDisable(GL_LIGHTING)
             glColor4f(*color, 0.2)
-            glutWireSphere(drone.radius * 3, 8, 8)  # 3x radius for safety volume
+            self.draw_wire_sphere(drone.radius * 3, 8, 8)  # 3x radius for safety volume
             glEnable(GL_LIGHTING)
             
         glPopMatrix()
+        
+    def draw_sphere(self, radius, slices, stacks):
+        """Draw a sphere"""
+        try:
+            quad = gluNewQuadric()
+            gluSphere(quad, radius, slices, stacks)
+            gluDeleteQuadric(quad)
+        except:
+            # Fallback: simple sphere approximation
+            glBegin(GL_TRIANGLE_FAN)
+            for i in range(slices + 1):
+                lat0 = math.pi * (-0.5 + float(i - 1) / slices)
+                z0 = radius * math.sin(lat0)
+                zr0 = radius * math.cos(lat0)
+                
+                lat1 = math.pi * (-0.5 + float(i) / slices)
+                z1 = radius * math.sin(lat1)
+                zr1 = radius * math.cos(lat1)
+                
+                for j in range(stacks + 1):
+                    lng = 2 * math.pi * float(j - 1) / stacks
+                    x = math.cos(lng)
+                    y = math.sin(lng)
+                    
+                    glNormal3f(x * zr0, y * zr0, z0)
+                    glVertex3f(x * zr0, y * zr0, z0)
+                    glNormal3f(x * zr1, y * zr1, z1)
+                    glVertex3f(x * zr1, y * zr1, z1)
+            glEnd()
+            
+    def draw_wire_sphere(self, radius, slices, stacks):
+        """Draw a wireframe sphere"""
+        glBegin(GL_LINES)
+        # Draw longitude lines
+        for i in range(slices):
+            lat0 = math.pi * (-0.5 + float(i) / slices)
+            lat1 = math.pi * (-0.5 + float(i + 1) / slices)
+            
+            for j in range(stacks):
+                lng = 2 * math.pi * float(j) / stacks
+                x0 = radius * math.cos(lat0) * math.cos(lng)
+                y0 = radius * math.cos(lat0) * math.sin(lng)
+                z0 = radius * math.sin(lat0)
+                
+                x1 = radius * math.cos(lat1) * math.cos(lng)
+                y1 = radius * math.cos(lat1) * math.sin(lng)
+                z1 = radius * math.sin(lat1)
+                
+                glVertex3f(x0, y0, z0)
+                glVertex3f(x1, y1, z1)
+                
+        # Draw latitude lines
+        for i in range(stacks):
+            lng0 = 2 * math.pi * float(i) / stacks
+            lng1 = 2 * math.pi * float(i + 1) / stacks
+            
+            for j in range(slices):
+                lat = math.pi * (-0.5 + float(j) / slices)
+                x0 = radius * math.cos(lat) * math.cos(lng0)
+                y0 = radius * math.cos(lat) * math.sin(lng0)
+                z0 = radius * math.sin(lat)
+                
+                x1 = radius * math.cos(lat) * math.cos(lng1)
+                y1 = radius * math.cos(lat) * math.sin(lng1)
+                z1 = radius * math.sin(lat)
+                
+                glVertex3f(x0, y0, z0)
+                glVertex3f(x1, y1, z1)
+        glEnd()
         
     def draw_trajectory(self, drone):
         """Draw drone trajectory"""
@@ -1551,8 +1832,6 @@ class Interactive3DViewer(BaseViewer):
                 glDisable(GL_LIGHTING)
                 glColor4f(1, 1, 0, 0.5)
                 glLineWidth(1.0)
-                glLineStipple(1, 0x0F0F)  # Dashed line
-                glEnable(GL_LINE_STIPPLE)
                 
                 glBegin(GL_LINE_STRIP)
                 glVertex3f(last_wp.x, last_wp.y, last_wp.z)
@@ -1565,7 +1844,6 @@ class Interactive3DViewer(BaseViewer):
                     glVertex3f(x, y, z)
                     
                 glEnd()
-                glDisable(GL_LINE_STIPPLE)
                 glEnable(GL_LIGHTING)
                 
     def draw_conflicts(self):
@@ -1592,15 +1870,11 @@ class Interactive3DViewer(BaseViewer):
             
             glColor4f(*color)
             
-            # Solid sphere
+            # Wireframe sphere
             glEnable(GL_BLEND)
             glDepthMask(GL_FALSE)
-            glutSolidSphere(radius, 16, 16)
+            self.draw_wire_sphere(radius, 8, 8)
             glDepthMask(GL_TRUE)
-            
-            # Wireframe outline
-            glColor4f(*color[:3], 1.0)
-            glutWireSphere(radius, 8, 8)
             glDisable(GL_BLEND)
             
         glEnable(GL_LIGHTING)
@@ -1735,9 +2009,6 @@ class Interactive3DViewer(BaseViewer):
     def select_drone_at_screen(self, screen_pos):
         """Select drone by clicking (simple ray casting)"""
         # Simple implementation - just check all drones
-        # In a real implementation, you would use proper ray casting
-        
-        # For now, just cycle through drones
         drone_ids = list(self.drones.keys())
         if drone_ids:
             if self.selected_drone is None:
@@ -1892,454 +2163,119 @@ class Interactive3DViewer(BaseViewer):
         pygame.quit()
 
 # ============================================================================
-# DATA STREAMER FOR REAL-TIME VISUALIZATION
+# SIMPLIFIED COMPATIBILITY WRAPPERS
 # ============================================================================
 
-class DataStreamer:
-    """Stream data to viewers in real-time"""
-    
-    def __init__(self, viewers):
-        self.viewers = viewers
-        self.running = False
-        self.thread = None
-        self.data_queue = []
-        self.lock = threading.Lock()
-        
-    def start(self):
-        """Start streaming thread"""
-        self.running = True
-        self.thread = threading.Thread(target=self._stream_loop)
-        self.thread.daemon = True
-        self.thread.start()
-        
-    def stop(self):
-        """Stop streaming thread"""
-        self.running = False
-        if self.thread:
-            self.thread.join()
-            
-    def add_data(self, data):
-        """Add data to stream queue"""
-        with self.lock:
-            self.data_queue.append(data)
-            
-    def _stream_loop(self):
-        """Main streaming loop"""
-        while self.running:
-            with self.lock:
-                if self.data_queue:
-                    data = self.data_queue.pop(0)
-                    # Process and update viewers
-                    self._update_viewers(data)
-            time.sleep(0.01)  # 100 Hz
-            
-    def _update_viewers(self, data):
-        """Update all viewers with new data"""
-        # Implementation depends on data format
-        pass
-
-# ============================================================================
-# LAUNCHER WITH IMPROVED FEATURES
-# ============================================================================
-
-class VisualizationLauncher:
-    """Enhanced launcher with more options"""
-    
-    def __init__(self):
-        self.viewers = []
-        
-    def create_sample_data(self):
-        """Create sample data for demonstration"""
-        drones = {}
-        conflicts = []
-        
-        # Create primary drone
-        primary_id = "Drone_001"
-        primary_waypoints = []
-        for i in range(50):
-            t = i * 0.5
-            x = np.sin(t) * 50
-            y = t * 2
-            z = np.cos(t) * 50 + 30
-            primary_waypoints.append(Waypoint(x, y, z, t))
-            
-        drones[primary_id] = Drone(
-            id=primary_id,
-            waypoints=primary_waypoints,
-            color=(1, 0, 0, 1),
-            is_primary=True,
-            radius=2.0
-        )
-        
-        # Create other drones
-        for j in range(5):
-            drone_id = f"Drone_{j+2:03d}"
-            waypoints = []
-            for i in range(40):
-                t = i * 0.6 + j * 2
-                x = np.sin(t + j) * 40 + j * 10
-                y = t * 1.8 + j * 5
-                z = np.cos(t + j) * 40 + 20
-                waypoints.append(Waypoint(x, y, z, t))
-                
-            drones[drone_id] = Drone(
-                id=drone_id,
-                waypoints=waypoints,
-                color=(0.3, 0.5, 1.0, 1),
-                radius=1.5
-            )
-            
-        # Create sample conflicts
-        for i in range(8):
-            severity = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'][i % 4]
-            conflicts.append(Conflict(
-                time=i * 3,
-                location={'x': np.random.uniform(-40, 40),
-                         'y': np.random.uniform(0, 80),
-                         'z': np.random.uniform(10, 50)},
-                severity=severity,
-                drones_involved=[primary_id, f"Drone_{np.random.randint(2, 7):03d}"],
-                distance=np.random.uniform(5, 20)
-            ))
-            
-        return drones, conflicts
-        
-    def launch(self, viewer_type='menu', drones=None, conflicts=None):
-        """Launch interactive viewer"""
-        if not OPENGL_AVAILABLE:
-            print("❌ OpenGL/PyGame not available!")
-            return
-            
-        # Use sample data if none provided
-        if drones is None or conflicts is None:
-            drones, conflicts = self.create_sample_data()
-            
-        if viewer_type == 'menu':
-            self._show_menu(drones, conflicts)
-        elif viewer_type == '2d':
-            viewer = Interactive2DViewer(drones, conflicts)
-            self.viewers.append(viewer)
-        elif viewer_type == '3d':
-            viewer = Interactive3DViewer(drones, conflicts)
-            self.viewers.append(viewer)
-        elif viewer_type == 'all':
-            print("Launching all viewers...")
-            viewer1 = Interactive2DViewer(drones, conflicts)
-            viewer2 = Interactive3DViewer(drones, conflicts)
-            self.viewers.extend([viewer1, viewer2])
-            
-    def _show_menu(self, drones, conflicts):
-        """Show enhanced menu"""
-        print("\n" + "="*80)
-        print("NATIVE INTERACTIVE VISUALIZATION SYSTEM")
-        print("Enhanced OpenGL-based Viewers")
-        print("="*80)
-        
-        menu_options = [
-            "1. 2D Multi-View Viewer (Enhanced)",
-            "2. 3D Trajectory Viewer (Enhanced)", 
-            "3. Launch Both (2D + 3D)",
-            "4. Data Analysis Dashboard",
-            "5. Real-time Simulation Mode",
-            "6. Export Current Configuration",
-            "7. Load Saved Configuration",
-            "8. System Information",
-            "0. Exit"
-        ]
-        
-        print("\n".join(menu_options))
-        print("="*80)
-        
-        while True:
-            try:
-                choice = input("\nEnter choice (0-8): ").strip()
-                
-                if choice == '0':
-                    break
-                elif choice == '1':
-                    self.launch('2d', drones, conflicts)
-                elif choice == '2':
-                    self.launch('3d', drones, conflicts)
-                elif choice == '3':
-                    self.launch('all', drones, conflicts)
-                elif choice == '4':
-                    self._show_analysis_dashboard(drones, conflicts)
-                elif choice == '5':
-                    self._start_real_time_simulation(drones, conflicts)
-                elif choice == '6':
-                    self._export_configuration(drones, conflicts)
-                elif choice == '7':
-                    loaded_data = self._load_configuration()
-                    if loaded_data:
-                        drones, conflicts = loaded_data
-                        print("✅ Configuration loaded successfully!")
-                elif choice == '8':
-                    self._show_system_info()
-                else:
-                    print("Invalid choice. Please try again.")
-                    
-            except KeyboardInterrupt:
-                print("\nExiting...")
-                break
-                
-    def _show_analysis_dashboard(self, drones, conflicts):
-        """Show data analysis dashboard"""
-        print("\n" + "="*80)
-        print("DATA ANALYSIS DASHBOARD")
-        print("="*80)
-        
-        # Basic statistics
-        total_distance = 0
-        total_flight_time = 0
-        max_speed = 0
-        
-        for drone in drones.values():
-            if len(drone.waypoints) >= 2:
-                # Calculate total distance
-                distance = 0
-                for i in range(len(drone.waypoints) - 1):
-                    wp1 = drone.waypoints[i]
-                    wp2 = drone.waypoints[i + 1]
-                    dx = wp2.x - wp1.x
-                    dy = wp2.y - wp1.y
-                    dz = wp2.z - wp1.z
-                    distance += np.sqrt(dx*dx + dy*dy + dz*dz)
-                    
-                total_distance += distance
-                
-                # Calculate flight time
-                flight_time = drone.waypoints[-1].t - drone.waypoints[0].t
-                total_flight_time += flight_time
-                
-                # Calculate max speed
-                for i in range(len(drone.waypoints) - 1):
-                    wp1 = drone.waypoints[i]
-                    wp2 = drone.waypoints[i + 1]
-                    dt = wp2.t - wp1.t
-                    if dt > 0:
-                        dx = wp2.x - wp1.x
-                        dy = wp2.y - wp1.y
-                        dz = wp2.z - wp1.z
-                        speed = np.sqrt(dx*dx + dy*dy + dz*dz) / dt
-                        max_speed = max(max_speed, speed)
-                        
-        print(f"\n📊 Statistics:")
-        print(f"  • Total Drones: {len(drones)}")
-        print(f"  • Total Conflicts: {len(conflicts)}")
-        print(f"  • Total Distance: {total_distance:.1f} m")
-        print(f"  • Total Flight Time: {total_flight_time:.1f} s")
-        print(f"  • Maximum Speed: {max_speed:.1f} m/s")
-        
-        # Conflict analysis
-        if conflicts:
-            print(f"\n⚠️  Conflict Analysis:")
-            severity_counts = {}
-            for conflict in conflicts:
-                severity_counts[conflict.severity] = severity_counts.get(conflict.severity, 0) + 1
-                
-            for severity, count in severity_counts.items():
-                print(f"  • {severity}: {count}")
-                
-        print("\nPress Enter to continue...")
-        input()
-        
-    def _start_real_time_simulation(self, drones, conflicts):
-        """Start real-time simulation"""
-        print("\n🚀 Starting real-time simulation...")
-        print("(Press Ctrl+C to stop)")
-        
-        # Create a streamer
-        streamer = DataStreamer(self.viewers)
-        streamer.start()
-        
-        try:
-            # Simulate real-time data
-            sim_time = 0
-            while True:
-                # Generate simulated data
-                sim_data = {
-                    'time': sim_time,
-                    'drones': {},
-                    'conflicts': []
-                }
-                
-                # Update drone positions
-                for drone_id, drone in drones.items():
-                    position = self._interpolate_position(drone.waypoints, sim_time)
-                    if position:
-                        sim_data['drones'][drone_id] = position
-                        
-                # Add to stream
-                streamer.add_data(sim_data)
-                
-                sim_time += 0.1
-                time.sleep(0.1)
-                
-        except KeyboardInterrupt:
-            print("\nSimulation stopped.")
-            streamer.stop()
-            
-    def _interpolate_position(self, waypoints, t):
-        """Interpolate position at time t"""
-        if not waypoints:
-            return None
-            
-        for i in range(len(waypoints) - 1):
-            wp1, wp2 = waypoints[i], waypoints[i + 1]
-            if wp1.t <= t <= wp2.t:
-                alpha = (t - wp1.t) / (wp2.t - wp1.t)
-                x = wp1.x + alpha * (wp2.x - wp1.x)
-                y = wp1.y + alpha * (wp2.y - wp1.y)
-                z = wp1.z + alpha * (wp2.z - wp1.z)
-                return (x, y, z)
-                
-        return None
-        
-    def _export_configuration(self, drones, conflicts):
-        """Export current configuration"""
-        config = {
-            'drones': {},
-            'conflicts': []
-        }
-        
-        # Export drones
-        for drone_id, drone in drones.items():
-            config['drones'][drone_id] = {
-                'waypoints': [(wp.x, wp.y, wp.z, wp.t) for wp in drone.waypoints],
-                'color': drone.color,
-                'is_primary': drone.is_primary,
-                'radius': drone.radius
-            }
-            
-        # Export conflicts
-        for conflict in conflicts:
-            config['conflicts'].append({
-                'time': conflict.time,
-                'location': conflict.location,
-                'severity': conflict.severity,
-                'drones_involved': conflict.drones_involved,
-                'distance': conflict.distance
-            })
-            
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        filename = f"visualization_config_{timestamp}.json"
-        
-        with open(filename, 'w') as f:
-            json.dump(config, f, indent=2)
-            
-        print(f"✅ Configuration exported to {filename}")
-        
-    def _load_configuration(self):
-        """Load configuration from file"""
-        import tkinter as tk
-        from tkinter import filedialog
-        
-        root = tk.Tk()
-        root.withdraw()  # Hide main window
-        
-        filename = filedialog.askopenfilename(
-            title="Select configuration file",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-        
-        if not filename:
-            return None
-            
-        try:
-            with open(filename, 'r') as f:
-                config = json.load(f)
-                
-            # Convert back to objects
-            drones = {}
-            for drone_id, drone_data in config['drones'].items():
-                waypoints = [Waypoint(*wp) for wp in drone_data['waypoints']]
-                drones[drone_id] = Drone(
-                    id=drone_id,
-                    waypoints=waypoints,
-                    color=tuple(drone_data['color']),
-                    is_primary=drone_data['is_primary'],
-                    radius=drone_data['radius']
-                )
-                
-            conflicts = []
-            for conflict_data in config['conflicts']:
-                conflicts.append(Conflict(**conflict_data))
-                
-            return drones, conflicts
-            
-        except Exception as e:
-            print(f"❌ Error loading configuration: {e}")
-            return None
-            
-    def _show_system_info(self):
-        """Display system information"""
-        print("\n" + "="*80)
-        print("SYSTEM INFORMATION")
-        print("="*80)
-        
-        import platform
-        import sys
-        
-        info = {
-            "Platform": platform.platform(),
-            "Python Version": sys.version,
-            "OpenGL Version": glGetString(GL_VERSION).decode(),
-            "Vendor": glGetString(GL_VENDOR).decode(),
-            "Renderer": glGetString(GL_RENDERER).decode(),
-            "Pygame Version": pygame.version.ver,
-            "NumPy Version": np.__version__
-        }
-        
-        for key, value in info.items():
-            print(f"{key:20}: {value}")
-            
-        print("\nPress Enter to continue...")
-        input()
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
-
-def launch_interactive_viewer(drones_data=None, conflicts=None, viewer_type='menu'):
+class Simple2DViewer:
     """
-    Enhanced launcher for interactive visualization
+    Simple 2D viewer for backward compatibility
+    """
+    
+    def __init__(self, drones_data: Dict, conflicts: List = None):
+        # Just use the enhanced viewer directly
+        self.viewer = Interactive2DViewer(drones_data, conflicts)
+        
+class Simple3DViewer:
+    """
+    Simple 3D viewer for backward compatibility
+    """
+    
+    def __init__(self, drones_data: Dict, conflicts: List = None):
+        # Just use the enhanced viewer directly
+        self.viewer = Interactive3DViewer(drones_data, conflicts)
+
+# ============================================================================
+# MAIN LAUNCHER FUNCTION
+# ============================================================================
+
+def launch_interactive_viewer(drones_data: Dict, conflicts: List = None, viewer_type='menu'):
+    """
+    Main function to launch interactive viewer
     
     Args:
-        drones_data: Dictionary of drone data (or Drone objects)
-        conflicts: List of conflicts
-        viewer_type: '2d', '3d', 'all', or 'menu'
+        drones_data: Dictionary of drone data (can be in any format)
+        conflicts: List of conflicts (can be dicts or objects)
+        viewer_type: '2d', '3d', '4d', or 'menu' to choose
     """
     
     if not OPENGL_AVAILABLE:
         print("❌ OpenGL/PyGame not available!")
         return
-        
-    # Convert legacy format if needed
-    if drones_data and not isinstance(next(iter(drones_data.values())), Drone):
-        drones_data = convert_legacy_format(drones_data)
-        
-    launcher = VisualizationLauncher()
-    launcher.launch(viewer_type, drones_data, conflicts)
     
-def convert_legacy_format(legacy_data):
-    """Convert legacy drone data format to new Drone objects"""
-    drones = {}
+    print(f"🎮 Launching interactive visualization...")
+    print(f"   Drones: {len(drones_data)}")
+    print(f"   Conflicts: {len(conflicts) if conflicts else 0}")
     
-    for drone_id, data in legacy_data.items():
-        waypoints = []
-        for wp in data.get('waypoints', []):
-            if hasattr(wp, 'x'):  # Already a Waypoint object
-                waypoints.append(wp)
-            else:  # Assume tuple/list
-                waypoints.append(Waypoint(wp[0], wp[1], wp[2], wp[3]))
-                
-        drones[drone_id] = Drone(
-            id=drone_id,
-            waypoints=waypoints,
-            is_primary=data.get('is_primary', False)
-        )
+    if viewer_type == 'menu':
+        print("\n" + "="*80)
+        print("INTERACTIVE VISUALIZATION MENU")
+        print("="*80)
+        print("Choose viewer type:")
+        print("  1. 2D Multi-View (Enhanced)")
+        print("  2. 3D Trajectory Viewer (Enhanced)")
+        print("  3. Launch Both (2D + 3D)")
+        print("="*80)
         
-    return drones
+        try:
+            choice = input("Enter choice (1-3): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting...")
+            return
+            
+        if choice == '1':
+            viewer_type = '2d'
+        elif choice == '2':
+            viewer_type = '3d'
+        elif choice == '3':
+            # Launch both sequentially
+            print("\n🚀 Launching 2D viewer...")
+            Interactive2DViewer(drones_data, conflicts)
+            print("\n🚀 Launching 3D viewer...")
+            Interactive3DViewer(drones_data, conflicts)
+            return
+        else:
+            print("⚠️  Invalid choice. Using 2D viewer.")
+            viewer_type = '2d'
+    
+    if viewer_type == '2d':
+        viewer = Interactive2DViewer(drones_data, conflicts)
+    elif viewer_type == '3d':
+        viewer = Interactive3DViewer(drones_data, conflicts)
+    elif viewer_type == '4d':
+        # For backward compatibility, use 3D viewer
+        print("⚠️  4D viewer not available. Using 3D viewer instead.")
+        viewer = Interactive3DViewer(drones_data, conflicts)
+    else:
+        print(f"⚠️  Unknown viewer type: {viewer_type}. Using 2D viewer.")
+        viewer = Interactive2DViewer(drones_data, conflicts)
+
+# ============================================================================
+# LEGACY FUNCTIONS FOR BACKWARD COMPATIBILITY
+# ============================================================================
+
+def launch_2d_viewer(drones_data: Dict, conflicts: List = None):
+    """Legacy function for backward compatibility"""
+    launch_interactive_viewer(drones_data, conflicts, '2d')
+
+def launch_3d_viewer(drones_data: Dict, conflicts: List = None):
+    """Legacy function for backward compatibility"""
+    launch_interactive_viewer(drones_data, conflicts, '3d')
+
+def launch_4d_viewer(drones_data: Dict, conflicts: List = None):
+    """Legacy function for backward compatibility"""
+    launch_interactive_viewer(drones_data, conflicts, '4d')
+
+# ============================================================================
+# DIRECT SIMPLE LAUNCHERS
+# ============================================================================
+
+def launch_2d_simple(drones_data: Dict, conflicts: List = None):
+    """Simple 2D viewer launcher"""
+    Interactive2DViewer(drones_data, conflicts)
+
+def launch_3d_simple(drones_data: Dict, conflicts: List = None):
+    """Simple 3D viewer launcher"""
+    Interactive3DViewer(drones_data, conflicts)
 
 # ============================================================================
 # EXAMPLE USAGE
@@ -2347,24 +2283,88 @@ def convert_legacy_format(legacy_data):
 
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("ENHANCED NATIVE INTERACTIVE VISUALIZATION SYSTEM")
-    print("OpenGL-based 2D, 3D, and Real-time Viewers")
+    print("UNIVERSAL INTERACTIVE VISUALIZATION SYSTEM")
+    print("Handles any data format: dicts, objects, tuples, etc.")
     print("="*80)
     
-    # Quick test
-    launcher = VisualizationLauncher()
+    # Test with simulated Waypoint4D-like objects
+    class Waypoint4D:
+        def __init__(self, x, y, z, t):
+            self.x = x
+            self.y = y
+            self.z = z
+            self.t = t
+            self.vx = 0
+            self.vy = 0
+            self.vz = 0
+            
+    # Create sample data in various formats
+    drones = {}
     
-    print("\n1. Quick demo with sample data")
-    print("2. Launch with custom data")
-    print("3. Exit")
+    # Format 1: Waypoint4D objects
+    drones['drone_001'] = {
+        'waypoints': [
+            Waypoint4D(0, 0, 10, 0),
+            Waypoint4D(10, 0, 20, 10),
+            Waypoint4D(20, 10, 30, 20),
+            Waypoint4D(30, 20, 40, 30)
+        ],
+        'is_primary': True,
+        'color': (1, 0, 0, 1)
+    }
     
-    choice = input("\nEnter choice (1-3): ").strip()
+    # Format 2: Dictionaries
+    drones['drone_002'] = {
+        'waypoints': [
+            {'x': 5, 'y': 5, 'z': 15, 't': 0},
+            {'x': 15, 'y': 5, 'z': 25, 't': 10},
+            {'x': 25, 'y': 15, 'z': 35, 't': 20},
+            {'x': 35, 'y': 25, 'z': 45, 't': 30}
+        ],
+        'is_primary': False,
+        'color': (0, 0.5, 1, 1)
+    }
     
+    # Format 3: Tuples
+    drones['drone_003'] = {
+        'waypoints': [
+            (10, 0, 10, 0),
+            (20, 0, 20, 10),
+            (30, 10, 30, 20),
+            (40, 20, 40, 30)
+        ],
+        'is_primary': False,
+        'color': (0.5, 1, 0, 1)
+    }
+    
+    # Sample conflicts
+    conflicts = [
+        {
+            'time': 15,
+            'location': Waypoint4D(25, 10, 25, 15),  # Object format
+            'severity': 'HIGH',
+            'drones_involved': ['drone_001', 'drone_002'],
+            'distance': 5.0
+        },
+        {
+            'time': 25,
+            'location': {'x': 35, 'y': 20, 'z': 35},  # Dict format
+            'severity': 'MEDIUM',
+            'drones_involved': ['drone_002', 'drone_003'],
+            'distance': 8.0
+        }
+    ]
+    
+    print("\n1. Test with mixed data formats")
+    print("2. Exit")
+    
+    try:
+        choice = input("\nEnter choice (1-2): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        choice = '2'
+        
     if choice == '1':
-        launcher.launch('menu')
-    elif choice == '2':
-        print("\n⚠️  This would load your custom data")
-        print("For now, running demo with sample data...")
-        launcher.launch('menu')
+        print("\n🚀 Testing universal data conversion...")
+        launch_interactive_viewer(drones, conflicts, 'menu')
     else:
         print("Exiting...")

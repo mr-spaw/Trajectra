@@ -454,94 +454,300 @@ std::vector<Vector3D> generateFormationPositions(int num_drones, FormationType f
     return positions;
 }
 
-// Generate a primary drone trajectory
 DroneWaypoints generatePrimaryDroneTrajectory(const std::vector<DroneWaypoints>& regular_drones,
                                                int primary_start_step) {
     std::mt19937 gen(std::random_device{}());
     
-    // Create distributions
-    std::uniform_real_distribution<float> start_x_dist(X_MIN, X_MAX);
-    std::uniform_real_distribution<float> start_y_dist(Y_MIN, Y_MAX);
-    std::uniform_real_distribution<float> start_z_dist(Z_MIN + 20, Z_MAX - 20);
-    std::uniform_int_distribution<int> victim_dist(0, regular_drones.size() - 1);
-    std::uniform_int_distribution<int> collision_step_dist(primary_start_step + 10, 
-                                                          NUM_WAYPOINTS - 10);
-    std::uniform_real_distribution<float> perturb_dist(-2.0f, 2.0f);
+    // Primary drone is active from the start (time 0) and stays with swarm
+    std::uniform_real_distribution<float> speed_dist(MAX_VELOCITY * 0.4f, MAX_VELOCITY * 0.7f);
+    std::uniform_real_distribution<float> small_perturb(-0.2f, 0.2f);
     
     DroneWaypoints primary_drone;
     primary_drone.id = "primary_drone";
     primary_drone.is_primary_drone = true;
     
-    // Random starting position outside the main area
-    Vector3D start_position(
-        (gen() % 2 == 0) ? X_MIN - 100 : X_MAX + 100,
-        start_y_dist(gen),
-        start_z_dist(gen)
+    // START IN THE MIDDLE OF THE SWARM
+    // Find average position of drones at time 0 to start in the swarm
+    float avg_x = 0, avg_y = 0, avg_z = 0;
+    int count = std::min(10, (int)regular_drones.size());
+    for (int i = 0; i < count; ++i) {
+        avg_x += regular_drones[i].x[0];
+        avg_y += regular_drones[i].y[0];
+        avg_z += regular_drones[i].z[0];
+    }
+    avg_x /= count;
+    avg_y /= count;
+    avg_z /= count;
+    
+    // Start near the swarm center
+    Vector3D current_position(
+        avg_x + small_perturb(gen) * 20.0f,
+        avg_y + small_perturb(gen) * 20.0f,
+        avg_z + small_perturb(gen) * 5.0f
     );
     
-    // Choose a random victim drone to collide with
-    int victim_id = victim_dist(gen);
+    // Start with normal speed
+    float current_speed = speed_dist(gen);
     
-    // Choose random collision time point (after start)
-    int collision_step = collision_step_dist(gen);
-    float collision_time = collision_step * TIME_STEP;
+    // Choose a nearby drone to initially follow
+    int follow_drone = gen() % regular_drones.size();
+    Vector3D follow_position(
+        regular_drones[follow_drone].x[0],
+        regular_drones[follow_drone].y[0],
+        regular_drones[follow_drone].z[0]
+    );
     
-    // Get victim's position at collision time
-    float victim_x = regular_drones[victim_id].x[collision_step];
-    float victim_y = regular_drones[victim_id].y[collision_step];
-    float victim_z = regular_drones[victim_id].z[collision_step];
+    // Initial velocity - toward the drone we're following
+    Vector3D to_follow = follow_position - current_position;
+    Vector3D current_velocity = to_follow.normalized() * current_speed;
     
-    Vector3D collision_position(victim_x, victim_y, victim_z);
+    // Choose 2-3 victim drones that are NEARBY in the swarm
+    std::uniform_int_distribution<int> num_victims_dist(2, 3);
+    int num_victims = num_victims_dist(gen);
     
-    // Calculate trajectory to collision point
-    float time_to_collision = collision_time - (primary_start_step * TIME_STEP);
-    Vector3D direction_to_collision = (collision_position - start_position).normalized();
-    float distance_to_collision = (collision_position - start_position).length();
+    std::vector<int> victim_ids;
+    std::vector<int> victim_collision_steps;
     
-    // Calculate required velocity (slightly faster to ensure collision)
-    Vector3D collision_velocity = direction_to_collision * 
-        (distance_to_collision / time_to_collision) * PRIMARY_DRONE_SPEED_FACTOR;
+    // Find drones that are nearby at different times
+    for (int i = 0; i < num_victims; ++i) {
+        // Look for drones that will be nearby at future times
+        int best_victim = -1;
+        int best_time = -1;
+        float best_distance = 999999.0f;
+        
+        // Search for potential collision victims
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            int candidate = gen() % regular_drones.size();
+            
+            // Try different times between 20-180 seconds
+            int collision_time = 200 + (gen() % 1600); // 20-180 seconds
+            
+            if (collision_time >= NUM_WAYPOINTS - 10) continue;
+            
+            // Check if this drone will be reasonably close at that time
+            float future_x = regular_drones[candidate].x[collision_time];
+            float future_y = regular_drones[candidate].y[collision_time];
+            float future_z = regular_drones[candidate].z[collision_time];
+            
+            // Predict where primary will be (rough estimate)
+            float pred_x = current_position.x + current_velocity.x * collision_time * TIME_STEP;
+            float pred_y = current_position.y + current_velocity.y * collision_time * TIME_STEP;
+            
+            float distance = std::sqrt(
+                (future_x - pred_x) * (future_x - pred_x) +
+                (future_y - pred_y) * (future_y - pred_y)
+            );
+            
+            if (distance < 100.0f && distance < best_distance) {
+                best_distance = distance;
+                best_victim = candidate;
+                best_time = collision_time;
+            }
+        }
+        
+        if (best_victim != -1) {
+            victim_ids.push_back(best_victim);
+            victim_collision_steps.push_back(best_time);
+        } else {
+            // Fallback: random drone and time
+            victim_ids.push_back(gen() % regular_drones.size());
+            victim_collision_steps.push_back(200 + (gen() % 1600));
+        }
+    }
     
-    // Generate waypoints before collision
-    Vector3D current_position = start_position;
-    Vector3D current_velocity = collision_velocity;
+    // Sort by time
+    for (int i = 0; i < victim_collision_steps.size() - 1; ++i) {
+        for (int j = i + 1; j < victim_collision_steps.size(); ++j) {
+            if (victim_collision_steps[i] > victim_collision_steps[j]) {
+                std::swap(victim_ids[i], victim_ids[j]);
+                std::swap(victim_collision_steps[i], victim_collision_steps[j]);
+            }
+        }
+    }
     
+    // State for following the swarm
+    int current_follow_drone = follow_drone;
+    int follow_change_counter = 100; // Change followed drone every 10 seconds
+    
+    // Generate full trajectory - PRIMARY DRONE STAYS WITH SWARM
     for (int step = 0; step < NUM_WAYPOINTS; ++step) {
         float current_time = step * TIME_STEP;
         
-        if (step < primary_start_step) {
-            // Not active yet - stay at starting position
-            current_position = start_position;
-            current_velocity = Vector3D(0, 0, 0);
-        } else if (step <= collision_step) {
-            // Move toward collision point
-            float progress = (step - primary_start_step) / 
-                           static_cast<float>(collision_step - primary_start_step);
+        // Check if we're at a collision step
+        bool is_collision_step = false;
+        int collision_victim_id = -1;
+        
+        for (int i = 0; i < victim_ids.size(); ++i) {
+            if (step == victim_collision_steps[i]) {
+                is_collision_step = true;
+                collision_victim_id = victim_ids[i];
+                break;
+            }
+        }
+        
+        if (is_collision_step && collision_victim_id >= 0) {
+            // COLLISION - match exact position
+            current_position = Vector3D(
+                regular_drones[collision_victim_id].x[step],
+                regular_drones[collision_victim_id].y[step],
+                regular_drones[collision_victim_id].z[step]
+            );
             
-            // Add some random perturbation to make it look more natural
-            Vector3D perturbation(perturb_dist(gen), perturb_dist(gen), perturb_dist(gen) * 0.5f);
-            
-            current_position = start_position + 
-                             (collision_position - start_position) * progress + 
-                             perturbation * progress * (1.0f - progress);
-            current_velocity = collision_velocity + perturbation * 0.1f;
-        } else {
-            // After collision - continue moving with some random motion
-            current_velocity = current_velocity * 0.95f + 
-                             Vector3D(perturb_dist(gen), perturb_dist(gen), perturb_dist(gen) * 0.3f);
-            
-            // Ensure velocity is not too high
-            float speed = current_velocity.length();
-            if (speed > MAX_VELOCITY * PRIMARY_DRONE_SPEED_FACTOR) {
-                current_velocity = current_velocity.normalized() * MAX_VELOCITY * PRIMARY_DRONE_SPEED_FACTOR;
+            // Take on victim's velocity but continue
+            if (step > 0) {
+                float victim_vx = (regular_drones[collision_victim_id].x[step] - 
+                                  regular_drones[collision_victim_id].x[step-1]) / TIME_STEP;
+                float victim_vy = (regular_drones[collision_victim_id].y[step] - 
+                                  regular_drones[collision_victim_id].y[step-1]) / TIME_STEP;
+                
+                // Combine with current velocity
+                current_velocity = (current_velocity * 0.4f + 
+                                   Vector3D(victim_vx, victim_vy, 0) * 0.6f) * 1.1f;
+                current_speed = current_velocity.length();
+                
+                // Random new follow drone after collision
+                current_follow_drone = gen() % regular_drones.size();
             }
             
+        } else {
+            // NORMAL FLIGHT - STAY WITH THE SWARM
+            
+            // Periodically change which drone we're following
+            follow_change_counter--;
+            if (follow_change_counter <= 0 || 
+                current_follow_drone >= regular_drones.size() ||
+                step >= regular_drones[current_follow_drone].x.size()) {
+                
+                // Find a drone that's nearby to follow
+                float min_distance = 999999.0f;
+                int closest_drone = current_follow_drone;
+                
+                for (int i = 0; i < std::min(20, (int)regular_drones.size()); ++i) {
+                    int test_drone = (current_follow_drone + i) % regular_drones.size();
+                    if (step >= regular_drones[test_drone].x.size()) continue;
+                    
+                    float dx = regular_drones[test_drone].x[step] - current_position.x;
+                    float dy = regular_drones[test_drone].y[step] - current_position.y;
+                    float distance = std::sqrt(dx*dx + dy*dy);
+                    
+                    if (distance < min_distance && distance > 5.0f) {
+                        min_distance = distance;
+                        closest_drone = test_drone;
+                    }
+                }
+                
+                current_follow_drone = closest_drone;
+                follow_change_counter = 100 + (gen() % 100); // 10-20 seconds
+            }
+            
+            // Check if approaching a collision soon
+            bool approaching_collision = false;
+            int next_collision_step = -1;
+            int next_victim_id = -1;
+            
+            for (int i = 0; i < victim_ids.size(); ++i) {
+                if (step < victim_collision_steps[i]) {
+                    int steps_to_go = victim_collision_steps[i] - step;
+                    if (steps_to_go < 50) { // Within 5 seconds
+                        approaching_collision = true;
+                        next_collision_step = victim_collision_steps[i];
+                        next_victim_id = victim_ids[i];
+                        break;
+                    }
+                }
+            }
+            
+            Vector3D target_position;
+            float desired_speed = current_speed;
+            
+            if (approaching_collision) {
+                // Steer toward collision point
+                target_position = Vector3D(
+                    regular_drones[next_victim_id].x[next_collision_step],
+                    regular_drones[next_victim_id].y[next_collision_step],
+                    regular_drones[next_victim_id].z[next_collision_step]
+                );
+                
+                // Speed up slightly when heading for collision
+                desired_speed = std::min(current_speed * 1.2f, MAX_VELOCITY * 0.8f);
+            } else {
+                // Follow the chosen drone
+                if (step < regular_drones[current_follow_drone].x.size()) {
+                    target_position = Vector3D(
+                        regular_drones[current_follow_drone].x[step],
+                        regular_drones[current_follow_drone].y[step],
+                        regular_drones[current_follow_drone].z[step]
+                    );
+                } else {
+                    // Fallback: maintain current course
+                    target_position = current_position + current_velocity;
+                }
+                
+                // Normal speed variations
+                desired_speed = speed_dist(gen);
+            }
+            
+            // Calculate direction to target
+            Vector3D to_target = target_position - current_position;
+            float distance_to_target = to_target.length();
+            
+            if (distance_to_target > 0.1f) {
+                Vector3D target_direction = to_target.normalized();
+                
+                // Smooth turning
+                Vector3D current_dir = current_velocity.normalized();
+                float turn_rate = TURN_RATE * TIME_STEP;
+                float dot_product = clamp_value(current_dir.dot(target_direction), -1.0f, 1.0f);
+                float angle_diff = std::acos(dot_product);
+                
+                if (angle_diff > turn_rate) {
+                    float t = turn_rate / angle_diff;
+                    target_direction = current_dir + (target_direction - current_dir) * t;
+                    target_direction = target_direction.normalized();
+                }
+                
+                // Small perturbations for natural movement
+                Vector3D perturb(small_perturb(gen), small_perturb(gen), small_perturb(gen) * 0.05f);
+                target_direction = (target_direction + perturb * 0.1f).normalized();
+                
+                // Adjust speed smoothly
+                float speed_diff = desired_speed - current_speed;
+                float acceleration = clamp_value(speed_diff * 0.8f, 
+                                                -MAX_DECELERATION * 0.3f, 
+                                                MAX_ACCELERATION * 0.3f);
+                current_speed += acceleration * TIME_STEP;
+                
+                // Update velocity
+                current_velocity = target_direction * current_speed;
+            }
+            
+            // Update position
             current_position = current_position + current_velocity * TIME_STEP;
             
-            // Keep within bounds
-            current_position.x = clamp_value(current_position.x, X_MIN - 50, X_MAX + 50);
-            current_position.y = clamp_value(current_position.y, Y_MIN - 50, Y_MAX + 50);
-            current_position.z = clamp_value(current_position.z, Z_MIN + 5, Z_MAX - 5);
+            // Small altitude adjustments to match swarm
+            if (step % 30 == 0 && current_follow_drone < regular_drones.size() && 
+                step < regular_drones[current_follow_drone].z.size()) {
+                float target_z = regular_drones[current_follow_drone].z[step];
+                float z_diff = target_z - current_position.z;
+                if (std::abs(z_diff) > 2.0f) {
+                    current_position.z += clamp_value(z_diff * 0.1f, -1.0f, 1.0f);
+                }
+            }
+        }
+        
+        // Keep within swarm area (but allow some drift)
+        current_position.x = clamp_value(current_position.x, X_MIN + 50, X_MAX - 50);
+        current_position.y = clamp_value(current_position.y, Y_MIN + 50, Y_MAX - 50);
+        current_position.z = clamp_value(current_position.z, Z_MIN + 30, Z_MAX - 30);
+        
+        // Maintain reasonable speed
+        current_speed = current_velocity.length();
+        if (current_speed > MAX_VELOCITY * 0.8f) {
+            current_velocity = current_velocity.normalized() * MAX_VELOCITY * 0.8f;
+            current_speed = MAX_VELOCITY * 0.8f;
+        } else if (current_speed < MAX_VELOCITY * 0.3f) {
+            current_velocity = current_velocity.normalized() * MAX_VELOCITY * 0.3f;
+            current_speed = MAX_VELOCITY * 0.3f;
         }
         
         // Store waypoint
@@ -549,12 +755,10 @@ DroneWaypoints generatePrimaryDroneTrajectory(const std::vector<DroneWaypoints>&
         primary_drone.x.push_back(current_position.x);
         primary_drone.y.push_back(current_position.y);
         primary_drone.z.push_back(current_position.z);
-        
-        float speed = current_velocity.length();
-        primary_drone.velocity.push_back(speed);
+        primary_drone.velocity.push_back(current_speed);
         
         // Calculate heading
-        if (speed > 0.1f) {
+        if (current_speed > 0.1f) {
             float heading_rad = std::atan2(current_velocity.y, current_velocity.x);
             float heading_deg = heading_rad * 180.0f / M_PI;
             if (heading_deg < 0) heading_deg += 360.0f;
@@ -565,9 +769,15 @@ DroneWaypoints generatePrimaryDroneTrajectory(const std::vector<DroneWaypoints>&
         }
     }
     
-    std::cout << "  Primary drone will collide with " << regular_drones[victim_id].id 
-              << " at t=" << collision_time << "s" << std::endl;
-    std::cout << "  Collision position: (" << victim_x << ", " << victim_y << ", " << victim_z << ")" << std::endl;
+    std::cout << "\nPrimary drone behavior (FIXED - stays with swarm):" << std::endl;
+    std::cout << "  Starts in swarm center at time 0" << std::endl;
+    std::cout << "  Follows other drones in the swarm" << std::endl;
+    std::cout << "  Collisions with " << victim_ids.size() << " drones:" << std::endl;
+    for (int i = 0; i < victim_ids.size(); ++i) {
+        std::cout << "    - " << regular_drones[victim_ids[i]].id 
+                  << " at t=" << (victim_collision_steps[i] * TIME_STEP) << "s" << std::endl;
+    }
+    std::cout << "  Continues flying after each collision" << std::endl;
     
     return primary_drone;
 }

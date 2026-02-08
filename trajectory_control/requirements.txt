@@ -1,0 +1,45 @@
+# Core Requirements
+numpy>=1.21.0,<2.0.0
+matplotlib>=3.5.0,<4.0.0
+
+# Optional Performance Acceleration (Highly Recommended)
+numba>=0.56.0,<0.60.0  # JIT compilation for speed
+
+# Interactive Visualization
+pygame>=2.4.0,<3.0.0  # Cross-platform windowing
+PyOpenGL>=3.1.0,<4.0.0  # OpenGL bindings
+PyOpenGL-accelerate>=3.1.0,<4.0.0  # Optional acceleration
+
+# Alternative Visualization (Backend)
+scipy>=1.8.0,<2.0.0  # Scientific computing
+scikit-learn>=1.0.0,<2.0.0  # Machine learning for prediction
+
+# Data Processing
+pandas>=1.4.0,<2.0.0  # Data analysis
+openpyxl>=3.0.0,<4.0.0  # Excel export
+
+# Parallel Processing
+joblib>=1.1.0,<2.0.0  # Parallel computing
+
+# Typing and Development
+typing-extensions>=4.0.0,<5.0.0  # Type hints
+dataclasses>=0.6,<1.0.0  # Data structures (Python 3.6 compatibility)
+
+# Testing and Quality (optional)
+pytest>=7.0.0,<8.0.0  # Testing framework
+pytest-benchmark>=3.4.0,<4.0.0  # Performance benchmarking
+black>=22.0.0,<23.0.0  # Code formatting
+flake8>=4.0.0,<5.0.0  # Linting
+
+# Documentation (optional)
+sphinx>=4.0.0,<5.0.0  # Documentation generation
+sphinx-rtd-theme>=1.0.0,<2.0.0  # ReadTheDocs theme
+
+# Memory Optimization (optional)
+psutil>=5.9.0,<6.0.0  # System monitoring
+memory-profiler>=0.60.0,<1.0.0  # Memory profiling
+
+# Optional Cloud/Network Features
+requests>=2.28.0,<3.0.0  # HTTP requests
+websockets>=10.0,<11.0  # Real-time communication
+redis>=4.3.0,<5.0.0  # Caching

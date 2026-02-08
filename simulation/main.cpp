@@ -1,7 +1,5 @@
-// Scalable Enhanced UAV Deconfliction Simulation (100-1000 drones)
-// Compile: g++ uav_simulation.cpp -o uav_sim -lglut -lGLU -lGL -std=c++17 -O3 -pthread
-// Features: JSON trajectory loading, Spatial partitioning, LOD system
-// JSON-based collision loading
+
+// Compile: g++ main.cpp -o uav_sim -lglut -lGLU -lGL -std=c++17 -O3 -pthread
 
 #include <GL/glut.h>
 #include <cmath>
@@ -36,6 +34,7 @@ using json = nlohmann::json;
 // ============================================================================
 // Enhanced Vector3D Class with Full 3D Math Support
 // ============================================================================
+
 class Vector3D {
 public:
     float x, y, z;
@@ -123,6 +122,7 @@ public:
 // Configuration Constants
 // ============================================================================
 namespace Config {
+
     // Adjust based on your JSON bounds
     const float WORLD_SIZE = 1600.0f;           // Based on JSON bounds (-400 to 400)
     const float GRID_SIZE = 1600.0f;
@@ -133,9 +133,9 @@ namespace Config {
     const float LOD_DISTANCE_MID = 1000.0f;
     const float LOD_DISTANCE_FAR = 2000.0f;
     
-    // Primary drone configuration
-    static const Vector3D PRIMARY_DRONE_COLOR() { return Vector3D(0.0f, 1.0f, 0.0f); }  // Green
-    const float PRIMARY_DRONE_SIZE = 40.0f;  // Larger than other drones
+    // Primary drone configuration - ENHANCED FOR VISIBILITY
+    static const Vector3D PRIMARY_DRONE_COLOR() { return Vector3D(0.0f, 1.0f, 0.0f); }  
+    const float PRIMARY_DRONE_SIZE = 15.0f;  
 }
 
 // ============================================================================
@@ -194,7 +194,7 @@ struct CollisionData {
 class JSONCollisionLoader {
 private:
     std::vector<CollisionData> collisions;
-    mutable std::mutex data_mutex;  // Make mutable for const methods
+    mutable std::mutex data_mutex;
     std::string analysis_file_path;
     
 public:
@@ -219,7 +219,6 @@ public:
             std::lock_guard<std::mutex> lock(data_mutex);
             collisions.clear();
             
-            // Get metadata
             if (root.contains("metadata")) {
                 json metadata = root["metadata"];
                 std::cout << "Collision Analysis Metadata:" << std::endl;
@@ -228,7 +227,6 @@ public:
                 std::cout << "  Safety radius: " << metadata.value("safety_radius", 10.0f) << "m" << std::endl;
             }
             
-            // Load conflicts
             if (root.contains("conflicts")) {
                 json json_conflicts = root["conflicts"];
                 for (const auto& conflict : json_conflicts) {
@@ -238,7 +236,6 @@ public:
                 
                 std::cout << "Loaded " << collisions.size() << " collision entries from JSON." << std::endl;
                 
-                // Remove duplicates (optional - sometimes same conflict appears multiple times)
                 auto it = std::unique(collisions.begin(), collisions.end(),
                     [](const CollisionData& a, const CollisionData& b) {
                         return a.primary_drone_id == b.primary_drone_id &&
@@ -311,7 +308,6 @@ public:
             std::cout << "Time range: " << collisions.front().time << "s to " 
                       << collisions.back().time << "s" << std::endl;
             
-            // Count by severity
             std::map<std::string, int> severity_count;
             for (const auto& c : collisions) {
                 severity_count[c.severity]++;
@@ -350,20 +346,16 @@ public:
     }
     
     void update(float deltaTime) {
-        // Apply drag
         Vector3D dragForce = velocity * (-drag);
         applyForce(dragForce);
         
-        // Limit acceleration
         float accMag = acceleration.length();
         if (accMag > maxAcceleration) {
             acceleration = acceleration.normalized() * maxAcceleration;
         }
         
-        // Update velocity
         velocity += acceleration * deltaTime;
         
-        // Limit horizontal speed
         Vector3D horizVel(velocity.x, velocity.y, 0);
         float horizSpeed = horizVel.length();
         if (horizSpeed > maxSpeed) {
@@ -372,15 +364,11 @@ public:
             velocity.y *= scale;
         }
         
-        // Limit vertical speed
         if (fabs(velocity.z) > maxVerticalSpeed) {
             velocity.z = (velocity.z > 0 ? 1 : -1) * maxVerticalSpeed;
         }
         
-        // Update position
         position += velocity * deltaTime;
-        
-        // Reset acceleration for next frame
         acceleration = Vector3D(0, 0, 0);
     }
     
@@ -392,7 +380,6 @@ public:
         
         desired = desired.normalized();
         
-        // Slow down when approaching target
         if (distance < arrivalRadius) {
             float speed = maxSpeed * (distance / arrivalRadius);
             desired = desired * speed;
@@ -475,7 +462,6 @@ public:
     Vector3D predictPosition(float futureTime) const {
         if (waypoints.empty()) return Vector3D();
         
-        // For continuous looping, wrap time
         float totalDuration = getTotalDuration();
         if (totalDuration > 0) {
             futureTime = fmod(futureTime, totalDuration);
@@ -505,7 +491,6 @@ public:
     const Waypoint* getWaypointAtTime(float time) const {
         if (waypoints.empty()) return nullptr;
         
-        // Binary search for efficiency with many waypoints
         int low = 0;
         int high = waypoints.size() - 1;
         
@@ -530,7 +515,7 @@ public:
         
         float totalDuration = getTotalDuration();
         if (totalDuration > 0) {
-            time = fmod(time, totalDuration);  // Wrap time for looping
+            time = fmod(time, totalDuration);
         }
         
         for (size_t i = 0; i < waypoints.size() - 1; i++) {
@@ -547,7 +532,7 @@ public:
 };
 
 // ============================================================================
-// Enhanced Drone with Physics and Visual Effects
+// Drone with Physics and Visual Effects
 // ============================================================================
 class Drone {
 private:
@@ -563,11 +548,13 @@ private:
     float rotorAngle;
     float bodyTilt;
     
-    // Trail effect
+    // Trail effect - ENHANCED for primary drone
     std::vector<Vector3D> trail;
     std::vector<float> trailTimes;
     int maxTrailLength;
     int trailUpdateCounter;
+    
+    // For primary drone special effects
     float pulseEffect;
     float searchlightAngle;
     
@@ -578,28 +565,29 @@ private:
     bool isPrimaryDrone;
     
 public:
-    // In the Drone class constructor (around line 370-390)
-Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
-    : id(id), color(color), originalColor(color), currentTime(0), 
-      isActive(true), size(primary ? Config::PRIMARY_DRONE_SIZE : 2.0f), 
-      rotorAngle(0), bodyTilt(0), 
-      maxTrailLength(primary ? 500 : 50),  // Primary drone gets much longer trail
-      trailUpdateCounter(0), usePreciseTrajectory(false), isPrimaryDrone(primary) {
-    
-    idString = primary ? "PRIMARY" : ("UAV-" + std::to_string(id));
-    if (primary) {
-        originalColor = Config::PRIMARY_DRONE_COLOR();
-        color = Config::PRIMARY_DRONE_COLOR();
+    Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
+        : id(id), color(color), originalColor(color), currentTime(0), 
+          isActive(true), size(primary ? Config::PRIMARY_DRONE_SIZE : 2.0f), 
+          rotorAngle(0), bodyTilt(0), 
+          maxTrailLength(primary ? 500 : 50),
+          trailUpdateCounter(0), pulseEffect(0.0f), searchlightAngle(0.0f),
+          usePreciseTrajectory(false), isPrimaryDrone(primary) {
         
-        // Primary drone starts with a few trail points at its initial position
-        if (!trajectory.getWaypoints().empty()) {
-            Vector3D startPos = trajectory.getWaypoints()[0].position;
-            for (int i = 0; i < 10; i++) {
-                trail.push_back(startPos);
+        idString = primary ? "PRIMARY_DRONE" : ("UAV-" + std::to_string(id));
+        if (primary) {
+            originalColor = Vector3D(0.0f, 1.0f, 0.0f);
+            color = Vector3D(0.0f, 1.0f, 0.0f);
+            
+            // Initialize trail with some points at starting position
+            if (!trajectory.getWaypoints().empty()) {
+                Vector3D startPos = trajectory.getWaypoints()[0].position;
+                for (int i = 0; i < 20; i++) {
+                    trail.push_back(startPos);
+                    trailTimes.push_back(0.0f);
+                }
             }
         }
     }
-}
     
     void setTrajectory(const Trajectory& traj, bool precise = false) {
         trajectory = traj;
@@ -615,15 +603,21 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
         // Update simulation time
         currentTime += deltaTime;
         
+        // Update pulse effect for primary drone
+        if (isPrimaryDrone) {
+            pulseEffect += deltaTime * 5.0f;
+            searchlightAngle += deltaTime * 30.0f;
+        }
+        
         // Wrap time at 200 seconds for precise trajectory mode
         if (usePreciseTrajectory) {
             float totalDuration = trajectory.getTotalDuration();
             if (totalDuration > 0) {
-                // Reset to 0 when we reach total duration
                 if (currentTime >= totalDuration) {
                     currentTime = 0.0f;
                     // Reset trail when restarting
                     trail.clear();
+                    trailTimes.clear();
                 }
             }
         }
@@ -638,34 +632,28 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
             // Calculate velocity from trajectory for smooth movement
             float nextTime = currentTime + 0.1f;
             if (nextTime >= trajectory.getTotalDuration()) {
-                nextTime = 0.0f; // Wrap around
+                nextTime = 0.0f;
             }
             Vector3D nextPos = trajectory.getPositionAtTime(nextTime);
-            Vector3D desiredVel = (nextPos - targetPos) * 10.0f; // Convert to velocity
+            Vector3D desiredVel = (nextPos - targetPos) * 10.0f;
             
-            // Apply smooth movement
             Vector3D desired = targetPos - physics.position;
             float distance = desired.length();
             
             if (distance > 0.1f) {
-                // Blend between current velocity and desired trajectory velocity
                 physics.velocity = physics.velocity * 0.7f + desiredVel * 0.3f;
                 
-                // Limit speed
                 float speed = physics.velocity.length();
                 if (speed > 25.0f) {
                     physics.velocity = physics.velocity.normalized() * 25.0f;
                 }
                 
-                // Update position
                 physics.position += physics.velocity * deltaTime;
                 
-                // Calculate body tilt based on velocity
                 Vector3D horizVel(physics.velocity.x, physics.velocity.y, 0);
                 float horizSpeed = horizVel.length();
                 bodyTilt = std::min(horizSpeed * 2.0f, 25.0f);
             } else {
-                // Close enough to target
                 physics.position = targetPos;
             }
         } else {
@@ -675,12 +663,10 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
                 physics.seekTarget(target->position, target->arrivalRadius);
                 physics.update(deltaTime);
                 
-                // Calculate body tilt based on velocity
                 Vector3D horizVel(physics.velocity.x, physics.velocity.y, 0);
                 float speed = horizVel.length();
                 bodyTilt = std::min(speed * 2.0f, 25.0f);
                 
-                // Check if reached waypoint
                 if (physics.position.distance(target->position) < target->arrivalRadius) {
                     if (!trajectory.advanceWaypoint()) {
                         trajectory.loopTrajectory();
@@ -688,20 +674,44 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
                 }
             }
         }
-        
-        // Update trail (every 3rd frame for performance)
-        trailUpdateCounter++;
-        if (trailUpdateCounter >= 3) {
+ 
+        if (isPrimaryDrone) {
+            // Primary drone: ALWAYS add trail point every frame
             trail.push_back(physics.position);
+            trailTimes.push_back(currentTime);
+            
+            // Keep trail at max length
             if (trail.size() > maxTrailLength) {
                 trail.erase(trail.begin());
+                trailTimes.erase(trailTimes.begin());
             }
-            trailUpdateCounter = 0;
+            
+            // Also add "breadcrumbs" every 0.5 seconds
+            static float breadcrumbTimer = 0.0f;
+            breadcrumbTimer += deltaTime;
+            if (breadcrumbTimer > 0.5f) {
+                // Add an extra visible point
+                trail.push_back(physics.position);
+                trailTimes.push_back(currentTime);
+                breadcrumbTimer = 0.0f;
+            }
+        } else {
+            // Regular drones: update trail less frequently
+            trailUpdateCounter++;
+            if (trailUpdateCounter >= 3) {
+                trail.push_back(physics.position);
+                trailTimes.push_back(currentTime);
+                if (trail.size() > maxTrailLength) {
+                    trail.erase(trail.begin());
+                    trailTimes.erase(trailTimes.begin());
+                }
+                trailUpdateCounter = 0;
+            }
         }
     }
     
     void reset() {
-        currentTime = 0;  // Reset to time 0
+        currentTime = 0;
         isActive = true;
         trajectory.reset();
         if (!trajectory.getWaypoints().empty()) {
@@ -710,9 +720,12 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
             physics.acceleration = Vector3D(0, 0, 0);
         }
         trail.clear();
+        trailTimes.clear();
         rotorAngle = 0;
         bodyTilt = 0;
         trailUpdateCounter = 0;
+        pulseEffect = 0.0f;
+        searchlightAngle = 0.0f;
     }
     
     int getId() const { return id; }
@@ -726,17 +739,20 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
     float getRotorAngle() const { return rotorAngle; }
     float getBodyTilt() const { return bodyTilt; }
     const std::vector<Vector3D>& getTrail() const { return trail; }
+    const std::vector<float>& getTrailTimes() const { return trailTimes; }
     const Trajectory& getTrajectory() const { return trajectory; }
     bool getIsPrimary() const { return isPrimaryDrone; }
+    float getPulseEffect() const { return pulseEffect; }
+    float getSearchlightAngle() const { return searchlightAngle; }
     
     void setColor(Vector3D newColor) { 
-        if (!isPrimaryDrone) {  // Don't change primary drone color
+        if (!isPrimaryDrone) {
             color = newColor; 
         }
     }
     void resetColor() { 
         if (isPrimaryDrone) {
-            color = Config::PRIMARY_DRONE_COLOR();
+            color = Vector3D(0.0f, 1.0f, 0.0f);
         } else {
             color = originalColor; 
         }
@@ -759,7 +775,7 @@ Drone(int id, Vector3D color = Vector3D(1, 0, 0), bool primary = false)
 };
 
 // ============================================================================
-// Enhanced Display List Cache for Better Drone Graphics
+// Display List Cache
 // ============================================================================
 class DisplayListCache {
 private:
@@ -767,79 +783,27 @@ private:
     GLuint droneMediumDetail;
     GLuint droneLowDetail;
     GLuint rotorList;
-    GLuint primaryDroneList;  // Special display list for primary drone
+    GLuint primaryDroneList;
     bool initialized;
     
     void createPrimaryDrone() {
-        primaryDroneList = glGenLists(1);
-        glNewList(primaryDroneList, GL_COMPILE);
-        
-        float size = Config::PRIMARY_DRONE_SIZE;
-        
-        // Glowing core
-        glPushMatrix();
-        glScalef(size, size * 0.9f, size * 0.6f);
-        
-        // Inner bright core
-        glColor3f(0.0f, 1.0f, 0.0f);
-        glutSolidSphere(0.8f, 16, 16);
-        
-        // Outer glow effect
-        glEnable(GL_BLEND);
-        glColor4f(0.0f, 1.0f, 0.0f, 0.3f);
-        glutSolidSphere(1.0f, 12, 12);
-        glDisable(GL_BLEND);
-        glPopMatrix();
-        
-        // Enhanced metallic frame
-        glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT);
-        glColor3f(0.5f, 1.0f, 0.5f);
-        glLineWidth(2.5f);
-        glPushMatrix();
-        glScalef(size, size * 0.9f, size * 0.6f);
-        glutWireSphere(0.85f, 16, 16);
-        glPopMatrix();
-        glPopAttrib();
-        
-        // Arms with green glow
-        float armLength = size * 1.8f;
-        float armThickness = size * 0.2f;
-        
-        for (int i = 0; i < 4; i++) {
-            glPushMatrix();
-            
-            float posX = (i % 2 == 0) ? armLength/2 : -armLength/2;
-            float posY = (i < 2) ? armLength/2 : -armLength/2;
-            
-            glTranslatef(posX, posY, 0);
-            
-            // Rotate arm to correct orientation
-            if (i < 2) {
-                glRotatef(90, 0, 0, 1);
-            }
-            
-            // Draw tapered arm with glow
-            glEnable(GL_BLEND);
-            glColor4f(0.0f, 0.8f, 0.0f, 0.6f);
-            glBegin(GL_QUAD_STRIP);
-            for (int j = 0; j <= 10; j++) {
-                float t = j / 10.0f;
-                float x = armLength/2 - t * armLength;
-                float r = armThickness * (1.0f - t * 0.3f);
-                
-                glVertex3f(x, -r, -r);
-                glVertex3f(x, -r, r);
-                glVertex3f(x, r, -r);
-                glVertex3f(x, r, r);
-            }
-            glEnd();
-            glDisable(GL_BLEND);
-            
-            glPopMatrix();
-        }
-        
-        glEndList();
-    }
+    primaryDroneList = glGenLists(1);
+    glNewList(primaryDroneList, GL_COMPILE);
+    
+    float size = Config::PRIMARY_DRONE_SIZE * 0.5f;
+    
+    // Simple sphere body
+    glColor3f(0.0f, 1.0f, 0.0f);
+    glutSolidSphere(size, 12, 12);
+    
+    // Simple wireframe
+    glColor3f(0.1f, 0.5f, 0.1f);
+    glLineWidth(1.5f);
+    glutWireSphere(size * 1.05f, 8, 8);
+    glLineWidth(1.0f);
+    
+    glEndList();
+}
     
     void createFullDetailDrone() {
         droneFullDetail = glGenLists(1);
@@ -847,23 +811,19 @@ private:
         
         float size = 2.0f;
         
-        // Main body with smoother appearance
         glPushMatrix();
         glScalef(size, size * 0.8f, size * 0.5f);
         glutSolidSphere(0.7f, 16, 16);
         glPopMatrix();
         
-        // Metallic frame
-        glPushAttrib(GL_CURRENT_BIT | GL_LINE_BIT);
         glColor3f(0.2f, 0.2f, 0.25f);
         glLineWidth(1.5f);
         glPushMatrix();
         glScalef(size, size * 0.8f, size * 0.5f);
         glutWireSphere(0.72f, 12, 12);
         glPopMatrix();
-        glPopAttrib();
+        glLineWidth(1.0f);
         
-        // Arms with tapered ends
         float armLength = size * 1.5f;
         float armThickness = size * 0.15f;
         
@@ -875,12 +835,10 @@ private:
             
             glTranslatef(posX, posY, 0);
             
-            // Rotate arm to correct orientation
             if (i < 2) {
                 glRotatef(90, 0, 0, 1);
             }
             
-            // Draw tapered arm
             glColor3f(0.15f, 0.15f, 0.2f);
             glBegin(GL_QUAD_STRIP);
             for (int j = 0; j <= 8; j++) {
@@ -910,16 +868,13 @@ private:
         
         glColor3f(0.9f, 0.9f, 0.95f);
         
-        // Draw rotor hub
         glutSolidSphere(0.15f, 8, 8);
         
-        // Draw blades with slight curve
         for (int i = 0; i < 2; i++) {
             glPushMatrix();
             glRotatef(i * 180.0f, 0, 0, 1);
             
             glBegin(GL_QUADS);
-            // Blade with slight curve
             for (int seg = 0; seg < 3; seg++) {
                 float t1 = seg / 3.0f;
                 float t2 = (seg + 1) / 3.0f;
@@ -948,13 +903,11 @@ private:
         
         float size = 2.0f;
         
-        // Smoother body
         glPushMatrix();
         glScalef(size, size * 0.8f, size * 0.5f);
         glutSolidSphere(0.7f, 12, 12);
         glPopMatrix();
         
-        // Simple arms
         float armLength = size * 1.5f;
         glColor3f(0.15f, 0.15f, 0.2f);
         
@@ -976,7 +929,6 @@ private:
         droneLowDetail = glGenLists(1);
         glNewList(droneLowDetail, GL_COMPILE);
         
-        // Simple cube with slight scaling for better appearance
         glPushMatrix();
         glScalef(2.0f, 1.6f, 1.0f);
         glutSolidCube(1.0f);
@@ -1024,7 +976,7 @@ public:
 };
 
 // ============================================================================
-// Enhanced OpenGL Renderer with LOD and Performance Optimizations
+// OpenGL Renderer 
 // ============================================================================
 class OpenGLRenderer {
 private:
@@ -1058,6 +1010,7 @@ private:
     std::string currentTrajectoryFile;
     std::string currentAnalysisFile;
     
+    // Drawing functions
     void drawText(float x, float y, const std::string& text, void* font = GLUT_BITMAP_HELVETICA_12) {
         glRasterPos2f(x, y);
         for (char c : text) {
@@ -1073,73 +1026,140 @@ private:
     }
     
     void drawGrid() {
-        glLineWidth(1.0f);
-        glColor3f(0.15f, 0.15f, 0.18f);
-        
-        float step = gridSize / 20.0f;
-        
-        glBegin(GL_LINES);
-        for (float x = -gridSize; x <= gridSize; x += step) {
-            glVertex3f(x, -gridSize, 0.1f);
-            glVertex3f(x, gridSize, 0.1f);
-            glVertex3f(-gridSize, x, 0.1f);
-            glVertex3f(gridSize, x, 0.1f);
-        }
-        glEnd();
-        
-        // Major grid lines with slight glow effect
-        glLineWidth(2.0f);
-        glColor3f(0.25f, 0.25f, 0.3f);
-        step = gridSize / 4.0f;
-        
-        glEnable(GL_BLEND);
-        glBegin(GL_LINES);
-        for (float x = -gridSize; x <= gridSize; x += step) {
-            glVertex3f(x, -gridSize, 0.2f);
-            glVertex3f(x, gridSize, 0.2f);
-            glVertex3f(-gridSize, x, 0.2f);
-            glVertex3f(gridSize, x, 0.2f);
-        }
-        glEnd();
-        glDisable(GL_BLEND);
-        
-        glLineWidth(1.0f);
+    glDisable(GL_LIGHTING);
+    glLineWidth(1.0f);
+    
+    float step = gridSize / 20.0f;  // Major grid lines
+    
+    // Draw main grid (darker lines)
+    glColor3f(0.3f, 0.3f, 0.35f);
+    glBegin(GL_LINES);
+    for (float x = -gridSize; x <= gridSize; x += step) {
+        glVertex3f(x, -gridSize, 0.1f);
+        glVertex3f(x, gridSize, 0.1f);
+        glVertex3f(-gridSize, x, 0.1f);
+        glVertex3f(gridSize, x, 0.1f);
     }
+    glEnd();
+    
+    // Draw finer grid lines
+    glColor3f(0.2f, 0.2f, 0.25f);
+    glBegin(GL_LINES);
+    for (float x = -gridSize; x <= gridSize; x += step/4.0f) {
+        // Only draw if not a major line
+        if (fmod(x, step) != 0) {
+            glVertex3f(x, -gridSize, 0.05f);
+            glVertex3f(x, gridSize, 0.05f);
+            glVertex3f(-gridSize, x, 0.05f);
+            glVertex3f(gridSize, x, 0.05f);
+        }
+    }
+    glEnd();
+    
+    // Draw thicker coordinate lines
+    glLineWidth(2.0f);
+    glColor3f(0.4f, 0.4f, 0.45f);
+    glBegin(GL_LINES);
+    
+    // X-axis lines
+    for (float x = -gridSize; x <= gridSize; x += step * 2) {
+        glVertex3f(x, -gridSize, 0.15f);
+        glVertex3f(x, gridSize, 0.15f);
+        glVertex3f(-gridSize, x, 0.15f);
+        glVertex3f(gridSize, x, 0.15f);
+    }
+    glEnd();
+    
+    // Draw coordinate labels (optional)
+    if (showGrid) {
+        glColor3f(0.6f, 0.6f, 0.7f);
+        for (float x = -gridSize; x <= gridSize; x += step * 2) {
+            if (x != 0) {
+                std::ostringstream label;
+                label << std::fixed << std::setprecision(0) << x;
+                
+                // X-axis labels
+                drawText3D(x, -gridSize - step/2, 0.2f, label.str());
+                drawText3D(x, gridSize + step/2, 0.2f, label.str());
+                
+                // Y-axis labels
+                drawText3D(-gridSize - step/2, x, 0.2f, label.str());
+                drawText3D(gridSize + step/2, x, 0.2f, label.str());
+            }
+        }
+        
+        // Origin label
+        glColor3f(0.8f, 0.8f, 1.0f);
+        drawText3D(-step/2, -step/2, 0.2f, "0");
+    }
+    
+    glLineWidth(1.0f);
+    glEnable(GL_LIGHTING);
+}
     
     void drawAxes() {
-        glLineWidth(4.0f);
-        
-        // X axis (Red)
-        glColor3f(1.0f, 0.2f, 0.2f);
-        glBegin(GL_LINES);
-        glVertex3f(0, 0, 0);
-        glVertex3f(axisLength, 0, 0);
-        glEnd();
-        
-        // Y axis (Green)
-        glColor3f(0.2f, 1.0f, 0.2f);
-        glBegin(GL_LINES);
-        glVertex3f(0, 0, 0);
-        glVertex3f(0, axisLength, 0);
-        glEnd();
-        
-        // Z axis (Blue)
-        glColor3f(0.2f, 0.2f, 1.0f);
-        glBegin(GL_LINES);
-        glVertex3f(0, 0, 0);
-        glVertex3f(0, 0, axisLength);
-        glEnd();
-        
-        glLineWidth(1.0f);
-    }
+    glDisable(GL_LIGHTING);
+    glLineWidth(4.0f);
     
-    enum LODLevel {
-        LOD_HIGH,
-        LOD_MEDIUM,
-        LOD_LOW,
-        LOD_POINT
-    };
+    // X-axis (Red)
+    glColor3f(0.8f, 0.2f, 0.2f);
+    glBegin(GL_LINES);
+    glVertex3f(0, 0, 0);
+    glVertex3f(axisLength, 0, 0);
+    glEnd();
     
+    // Y-axis (Green)
+    glColor3f(0.2f, 0.8f, 0.2f);
+    glBegin(GL_LINES);
+    glVertex3f(0, 0, 0);
+    glVertex3f(0, axisLength, 0);
+    glEnd();
+    
+    // Z-axis (Blue)
+    glColor3f(0.2f, 0.2f, 0.8f);
+    glBegin(GL_LINES);
+    glVertex3f(0, 0, 0);
+    glVertex3f(0, 0, axisLength);
+    glEnd();
+    
+    // Arrowheads
+    float arrowSize = axisLength * 0.05f;
+    
+    // X-axis arrow
+    glColor3f(0.8f, 0.2f, 0.2f);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(axisLength, 0, 0);
+    glVertex3f(axisLength - arrowSize, arrowSize, 0);
+    glVertex3f(axisLength - arrowSize, -arrowSize, 0);
+    glEnd();
+    
+    // Y-axis arrow
+    glColor3f(0.2f, 0.8f, 0.2f);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(0, axisLength, 0);
+    glVertex3f(arrowSize, axisLength - arrowSize, 0);
+    glVertex3f(-arrowSize, axisLength - arrowSize, 0);
+    glEnd();
+    
+    // Z-axis arrow
+    glColor3f(0.2f, 0.2f, 0.8f);
+    glBegin(GL_TRIANGLES);
+    glVertex3f(0, 0, axisLength);
+    glVertex3f(arrowSize, 0, axisLength - arrowSize);
+    glVertex3f(-arrowSize, 0, axisLength - arrowSize);
+    glEnd();
+    
+    // Axis labels
+    glColor3f(1.0f, 1.0f, 1.0f);
+    drawText3D(axisLength + arrowSize, -arrowSize, 0, "X");
+    drawText3D(-arrowSize, axisLength + arrowSize, 0, "Y");
+    drawText3D(-arrowSize, 0, axisLength + arrowSize, "Z");
+    
+    glLineWidth(1.0f);
+    glEnable(GL_LIGHTING);
+}    
+
+    enum LODLevel { LOD_HIGH, LOD_MEDIUM, LOD_LOW, LOD_POINT };
     LODLevel getLODLevel(float distance) const {
         if (distance < Config::LOD_DISTANCE_NEAR) return LOD_HIGH;
         if (distance < Config::LOD_DISTANCE_MID) return LOD_MEDIUM;
@@ -1147,30 +1167,36 @@ private:
         return LOD_POINT;
     }
     
+    // Drone rendering
     void drawDrone(const Drone& drone, const Vector3D& cameraPos) {
+        if (drone.getIsPrimary()) {
+            drawPrimaryDroneEnhanced(drone, cameraPos);
+        } else {
+            drawRegularDrone(drone, cameraPos);
+        }
+    }
+    
+    void drawRegularDrone(const Drone& drone, const Vector3D& cameraPos) {
         Vector3D pos = drone.getPosition();
         Vector3D color = drone.getColor();
         float distance = pos.distance(cameraPos);
         LODLevel lod = getLODLevel(distance);
         
-        glPushMatrix();
-        glTranslatef(pos.x, pos.y, pos.z);
-        
-        // Point rendering for very distant drones
         if (lod == LOD_POINT) {
-            glPointSize(drone.getIsPrimary() ? 8.0f : 4.0f);
+            glPointSize(3.0f);
             glDisable(GL_LIGHTING);
             glEnable(GL_POINT_SMOOTH);
             glColor3f(color.x, color.y, color.z);
             glBegin(GL_POINTS);
-            glVertex3f(0, 0, 0);
+            glVertex3f(pos.x, pos.y, pos.z);
             glEnd();
             glEnable(GL_LIGHTING);
-            glPopMatrix();
             return;
         }
         
-        // Calculate forward direction for tilting (only for high LOD)
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y, pos.z);
+        
         if (lod == LOD_HIGH) {
             Vector3D vel = drone.getVelocity();
             if (vel.length() > 0.1f) {
@@ -1181,7 +1207,6 @@ private:
             }
         }
         
-        // Set material properties for better lighting
         GLfloat matAmbient[] = {color.x * 0.3f, color.y * 0.3f, color.z * 0.3f, 1.0f};
         GLfloat matDiffuse[] = {color.x, color.y, color.z, 1.0f};
         GLfloat matSpecular[] = {0.7f, 0.7f, 0.7f, 1.0f};
@@ -1192,184 +1217,445 @@ private:
         glMaterialfv(GL_FRONT, GL_SPECULAR, matSpecular);
         glMaterialfv(GL_FRONT, GL_SHININESS, matShininess);
         
-        // Special rendering for primary drone
-        if (drone.getIsPrimary() && lod == LOD_HIGH) {
-            glCallList(displayCache.getPrimaryDrone());
-            
-            // Draw pulsing glow around primary drone
-            static float pulse = 0.0f;
-            pulse += 0.1f;
-            float pulseSize = 15.0f + sin(pulse) * 3.0f;
-            
-            glDisable(GL_LIGHTING);
-            glEnable(GL_BLEND);
-            glColor4f(0.0f, 1.0f, 0.0f, 0.2f);
-            glutWireSphere(pulseSize, 16, 16);
-            glDisable(GL_BLEND);
-            glEnable(GL_LIGHTING);
-        } else {
-            // Regular drone rendering
-            switch (lod) {
-                case LOD_HIGH:
-                    glCallList(displayCache.getFullDetail());
+        switch (lod) {
+            case LOD_HIGH:
+                glCallList(displayCache.getFullDetail());
+                
+                if (distance < Config::LOD_DISTANCE_NEAR / 2) {
+                    float rotorAngle = drone.getRotorAngle();
+                    float size = drone.getSize();
+                    float armLength = size * 1.5f;
                     
-                    // Draw rotors with spinning animation
-                    if (distance < Config::LOD_DISTANCE_NEAR / 2) {
-                        float rotorAngle = drone.getRotorAngle();
-                        float size = drone.getSize();
-                        float armLength = size * 1.5f;
-                        
-                        float rotorPositions[4][2] = {
-                            {armLength, armLength},
-                            {-armLength, armLength},
-                            {armLength, -armLength},
-                            {-armLength, -armLength}
-                        };
-                        
-                        for (int i = 0; i < 4; i++) {
-                            glPushMatrix();
-                            glTranslatef(rotorPositions[i][0], rotorPositions[i][1], size/4);
-                            glRotatef(rotorAngle + i * 90, 0, 0, 1);
-                            glScalef(0.8f, 0.8f, 0.8f);
-                            glCallList(displayCache.getRotorModel());
-                            glPopMatrix();
-                        }
-                        
-                        // Draw subtle light effect under drones
-                        if (distance < 50.0f) {
-                            glDisable(GL_LIGHTING);
-                            glEnable(GL_BLEND);
-                            glColor4f(color.x, color.y, color.z, 0.1f);
-                            glBegin(GL_QUADS);
-                            float lightSize = 3.0f;
-                            glVertex3f(-lightSize, -lightSize, -1.0f);
-                            glVertex3f(lightSize, -lightSize, -1.0f);
-                            glVertex3f(lightSize, lightSize, -1.0f);
-                            glVertex3f(-lightSize, lightSize, -1.0f);
-                            glEnd();
-                            glDisable(GL_BLEND);
-                            glEnable(GL_LIGHTING);
-                        }
+                    float rotorPositions[4][2] = {
+                        {armLength, armLength},
+                        {-armLength, armLength},
+                        {armLength, -armLength},
+                        {-armLength, -armLength}
+                    };
+                    
+                    for (int i = 0; i < 4; i++) {
+                        glPushMatrix();
+                        glTranslatef(rotorPositions[i][0], rotorPositions[i][1], size/4);
+                        glRotatef(rotorAngle + i * 90, 0, 0, 1);
+                        glScalef(0.8f, 0.8f, 0.8f);
+                        glCallList(displayCache.getRotorModel());
+                        glPopMatrix();
                     }
-                    break;
-                    
-                case LOD_MEDIUM:
-                    glCallList(displayCache.getMediumDetail());
-                    break;
-                    
-                case LOD_LOW:
-                    glCallList(displayCache.getLowDetail());
-                    break;
-                    
-                default:
-                    break;
-            }
+                }
+                break;
+                
+            case LOD_MEDIUM:
+                glCallList(displayCache.getMediumDetail());
+                break;
+                
+            case LOD_LOW:
+                glCallList(displayCache.getLowDetail());
+                break;
+                
+            default:
+                break;
         }
         
-        // Reset material
         GLfloat defaultAmbient[] = {0.2f, 0.2f, 0.2f, 1.0f};
         GLfloat defaultDiffuse[] = {0.8f, 0.8f, 0.8f, 1.0f};
         glMaterialfv(GL_FRONT, GL_AMBIENT, defaultAmbient);
         glMaterialfv(GL_FRONT, GL_DIFFUSE, defaultDiffuse);
         
         glPopMatrix();
-        
-        // Draw velocity vector with glow effect (only for high LOD)
-        if (lod == LOD_HIGH && drone.getSpeed() > 0.1f) {
-            Vector3D vel = drone.getVelocity().normalized() * 8.0f;
-            glDisable(GL_LIGHTING);
-            glEnable(GL_BLEND);
-            glLineWidth(3.0f);
-            
-            // Outer glow
-            glColor4f(1.0f, 1.0f, 0.0f, 0.3f);
-            glBegin(GL_LINES);
-            glVertex3f(pos.x, pos.y, pos.z);
-            glVertex3f(pos.x + vel.x, pos.y + vel.y, pos.z + vel.z);
-            glEnd();
-            
-            // Inner line
-            glLineWidth(1.5f);
-            glColor4f(1.0f, 0.9f, 0.0f, 0.8f);
-            glBegin(GL_LINES);
-            glVertex3f(pos.x, pos.y, pos.z);
-            glVertex3f(pos.x + vel.x, pos.y + vel.y, pos.z + vel.z);
-            glEnd();
-            
-            glLineWidth(1.0f);
-            glDisable(GL_BLEND);
-            glEnable(GL_LIGHTING);
-        }
-        
-        // Draw labels with background
-        if (showDroneLabels && distance < Config::LOD_DISTANCE_NEAR / 3) {
-            glDisable(GL_LIGHTING);
-            glEnable(GL_BLEND);
-            
-            // Draw background for label
-            glColor4f(0.0f, 0.0f, 0.0f, 0.5f);
-            glBegin(GL_QUADS);
-            float labelWidth = drone.getIdString().length() * 4.0f;
-            float labelX = pos.x - labelWidth/2;
-            float labelY = pos.y;
-            float labelZ = pos.z + (drone.getIsPrimary() ? 12.0f : 8.0f);
-            
-            glVertex3f(labelX - 2, labelY - 2, labelZ);
-            glVertex3f(labelX + labelWidth + 2, labelY - 2, labelZ);
-            glVertex3f(labelX + labelWidth + 2, labelY + 8, labelZ);
-            glVertex3f(labelX - 2, labelY + 8, labelZ);
-            glEnd();
-            
-            // Draw text with different color for primary drone
-            if (drone.getIsPrimary()) {
-                glColor3f(0.0f, 1.0f, 0.0f);
-            } else {
-                glColor3f(1.0f, 1.0f, 1.0f);
-            }
-            drawText3D(labelX, labelY, labelZ + 0.1f, drone.getIdString());
-            
-            glDisable(GL_BLEND);
-            glEnable(GL_LIGHTING);
-        }
     }
     
-    void drawTrail(const Drone& drone, const Vector3D& cameraPos) {
-        const auto& trail = drone.getTrail();
-        if (trail.size() < 2) return;
+    void drawPrimaryDroneEnhanced(const Drone& drone, const Vector3D& cameraPos) {
+    Vector3D pos = drone.getPosition();
+    
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    
+
+    float pulse = 0.3f * sin(drone.getPulseEffect()) + 0.7f;
+    
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    
+    // Single subtle glow layer
+    glColor4f(0.0f, 0.8f, 0.0f, 0.15f);
+    glutSolidSphere(30.0f, 16, 16);
+    
+    // Pulsing core (smaller)
+    glColor4f(0.0f, 1.0f, 0.0f, 0.3f * pulse);
+    glutSolidSphere(20.0f, 16, 16);
+    
+    glEnable(GL_LIGHTING);
+
+    GLfloat matAmbient[] = {0.0f, 0.6f, 0.0f, 1.0f};
+    GLfloat matDiffuse[] = {0.0f, 1.0f, 0.0f, 1.0f};
+    GLfloat matSpecular[] = {0.5f, 0.5f, 0.5f, 1.0f};
+    GLfloat matShininess[] = {50.0f};
+    
+    glMaterialfv(GL_FRONT, GL_AMBIENT, matAmbient);
+    glMaterialfv(GL_FRONT, GL_DIFFUSE, matDiffuse);
+    glMaterialfv(GL_FRONT, GL_SPECULAR, matSpecular);
+    glMaterialfv(GL_FRONT, GL_SHININESS, matShininess);
+    
+    // Main body - simple sphere
+    float bodySize = Config::PRIMARY_DRONE_SIZE * 0.5f;
+    glColor3f(0.0f, 0.9f, 0.0f);
+    glutSolidSphere(bodySize, 16, 16);
+    
+    // Simple wireframe for structure visibility
+    glDisable(GL_LIGHTING);
+    glColor3f(0.1f, 0.5f, 0.1f);
+    glLineWidth(2.0f);
+    glutWireSphere(bodySize * 1.05f, 8, 8);
+    glLineWidth(1.0f);
+    glEnable(GL_LIGHTING);
+    
+    // Simple X-frame arms (4 lines)
+    float armLength = bodySize * 1.5f;
+    glDisable(GL_LIGHTING);
+    glColor3f(0.2f, 0.7f, 0.2f);
+    glLineWidth(3.0f);
+    
+    glBegin(GL_LINES);
+    for (int i = 0; i < 4; i++) {
+        float angle = 45.0f + i * 90.0f;
+        float radians = angle * M_PI / 180.0f;
+        float x = cos(radians) * armLength;
+        float y = sin(radians) * armLength;
         
-        float distance = drone.getPosition().distance(cameraPos);
-        if (distance > Config::LOD_DISTANCE_MID) return;
+        glVertex3f(0, 0, 0);
+        glVertex3f(x, y, 0);
+    }
+    glEnd();
+    glLineWidth(1.0f);
+    glEnable(GL_LIGHTING);
+    
+    // Simple rotors (small discs)
+    float rotorAngle = drone.getRotorAngle();
+    float rotorSize = bodySize * 0.6f;
+    
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    
+    for (int i = 0; i < 4; i++) {
+        glPushMatrix();
         
-        Vector3D color = drone.getColor();
-        glDisable(GL_LIGHTING);
-        glEnable(GL_BLEND);
-        glLineWidth(drone.getIsPrimary() ? 3.0f : 2.5f);
+        float angle = 45.0f + i * 90.0f;
+        float radians = angle * M_PI / 180.0f;
         
-        // Draw trail with gradient
-        glBegin(GL_LINE_STRIP);
-        for (size_t i = 0; i < trail.size(); i++) {
-            float alpha = pow((float)i / trail.size(), 2.0f); // Fade faster
-            float widthScale = 1.0f - alpha * 0.7f;
-            
-            if (drone.getIsPrimary()) {
-                glColor4f(color.x, color.y, color.z, alpha * 0.8f);
-            } else {
-                glColor4f(color.x, color.y, color.z, alpha * 0.6f);
-            }
-            glVertex3f(trail[i].x, trail[i].y, trail[i].z);
+        // Position at end of arm
+        float x = cos(radians) * armLength;
+        float y = sin(radians) * armLength;
+        
+        glTranslatef(x, y, 0);
+        glRotatef(rotorAngle + i * 90.0f, 0, 0, 1);
+        
+        // Simple rotor disc
+        glColor4f(0.8f, 0.9f, 1.0f, 0.4f);
+        glBegin(GL_TRIANGLE_FAN);
+        glVertex3f(0, 0, 0);
+        for (int j = 0; j <= 12; j++) {
+            float angle = 2.0f * M_PI * j / 12;
+            glVertex3f(cos(angle) * rotorSize, sin(angle) * rotorSize, 0);
         }
         glEnd();
         
-        // Draw trail dots at intervals
-        glPointSize(drone.getIsPrimary() ? 4.0f : 3.0f);
+        glPopMatrix();
+    }
+
+    glPushMatrix();
+    glRotatef(drone.getSearchlightAngle(), 0, 0, 1);
+    
+    // Simple downward beam
+    glColor4f(0.0f, 0.7f, 0.0f, 0.1f);
+    glBegin(GL_TRIANGLE_FAN);
+    glVertex3f(0, 0, -bodySize);
+    
+    float beamLength = 100.0f;
+    float beamWidth = 25.0f;
+    for (int i = 0; i <= 8; i++) {
+        float angle = 2.0f * M_PI * i / 8;
+        float x = cos(angle) * beamWidth;
+        float y = sin(angle) * beamWidth;
+        glVertex3f(x, y, -beamLength);
+    }
+    glEnd();
+    
+    glPopMatrix();
+    
+    glDisable(GL_BLEND);
+    glEnable(GL_LIGHTING);
+    
+    glPopMatrix();
+    
+    drawPrimaryDroneLabel(drone);
+}
+    
+    void drawPrimaryDroneSearchlight(const Drone& drone) {
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        
+        glPushMatrix();
+        glRotatef(drone.getSearchlightAngle(), 0, 0, 1);
+        
+        // Main beam cone
+        glColor4f(0.0f, 1.0f, 0.0f, 0.15f);
+        
+        glBegin(GL_TRIANGLE_FAN);
+        glVertex3f(0, 0, 0);
+        
+        int segments = 16;
+        float beamLength = 150.0f;
+        float beamWidth = 40.0f;
+        for (int i = 0; i <= segments; i++) {
+            float angle = 2.0f * M_PI * i / segments;
+            float x = cos(angle) * beamWidth;
+            float y = sin(angle) * beamWidth;
+            glVertex3f(x, y, -beamLength);
+        }
+        glEnd();
+        
+        // Ground spotlight
+        glBegin(GL_TRIANGLE_FAN);
+        glColor4f(0.0f, 1.0f, 0.0f, 0.1f);
+        glVertex3f(0, 0, -beamLength);
+        
+        glColor4f(0.0f, 1.0f, 0.0f, 0.01f);
+        float radius = 100.0f;
+        for (int i = 0; i <= segments; i++) {
+            float angle = 2.0f * M_PI * i / segments;
+            float x = cos(angle) * radius;
+            float y = sin(angle) * radius;
+            glVertex3f(x, y, -beamLength);
+        }
+        glEnd();
+        
+        glPopMatrix();
+        
+        glDisable(GL_BLEND);
+        glEnable(GL_LIGHTING);
+    }
+    
+   void drawPrimaryDroneLabel(const Drone& drone) {
+    if (!showDroneLabels) return;
+    
+    Vector3D pos = drone.getPosition();
+    
+    glDisable(GL_LIGHTING);
+    
+
+    glColor3f(0.0f, 1.0f, 0.0f);
+    std::ostringstream label;
+    label << "PRIMARY";
+    drawText3D(pos.x - 10, pos.y, pos.z + 25, label.str());
+    
+    glEnable(GL_LIGHTING);
+}
+    
+    void drawPrimaryDroneVelocityVector(const Drone& drone) {
+        if (drone.getSpeed() < 0.1f) return;
+        
+        Vector3D pos = drone.getPosition();
+        Vector3D vel = drone.getVelocity().normalized() * 30.0f;
+        
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        
+        glLineWidth(6.0f);
+        glColor4f(1.0f, 1.0f, 0.0f, 0.9f);
+        glBegin(GL_LINES);
+        glVertex3f(pos.x, pos.y, pos.z);
+        glVertex3f(pos.x + vel.x, pos.y + vel.y, pos.z + vel.z);
+        glEnd();
+        
+        glPushMatrix();
+        glTranslatef(pos.x + vel.x, pos.y + vel.y, pos.z + vel.z);
+        
+        Vector3D forward = vel.normalized();
+        float angle = atan2(forward.y, forward.x) * 180.0f / M_PI;
+        glRotatef(angle, 0, 0, 1);
+        
+        glColor4f(1.0f, 0.8f, 0.0f, 1.0f);
+        glBegin(GL_TRIANGLES);
+        glVertex3f(0, 0, 0);
+        glVertex3f(-5.0f, 2.0f, 0);
+        glVertex3f(-5.0f, -2.0f, 0);
+        glEnd();
+        
+        glPopMatrix();
+        
+        glLineWidth(1.0f);
+        glDisable(GL_BLEND);
+        glEnable(GL_LIGHTING);
+    }
+    
+    void drawPrimaryDroneCompass(const Drone& drone) {
+        Vector3D pos = drone.getPosition();
+        Vector3D vel = drone.getVelocity();
+        
+        if (vel.length() < 0.1f) return;
+        
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        
+        float compassRadius = 25.0f;
+        float compassZ = pos.z + 80.0f;
+        
+        glPushMatrix();
+        glTranslatef(pos.x, pos.y, compassZ);
+        
+        glColor4f(0.0f, 0.5f, 0.0f, 0.6f);
+        glLineWidth(3.0f);
+        glBegin(GL_LINE_LOOP);
+        int segments = 32;
+        for (int i = 0; i < segments; i++) {
+            float angle = 2.0f * M_PI * i / segments;
+            float x = cos(angle) * compassRadius;
+            float y = sin(angle) * compassRadius;
+            glVertex3f(x, y, 0);
+        }
+        glEnd();
+        
+        float angle = atan2(vel.y, vel.x);
+        float arrowX = cos(angle) * compassRadius;
+        float arrowY = sin(angle) * compassRadius;
+        
+        glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
+        glBegin(GL_TRIANGLES);
+        glVertex3f(arrowX, arrowY, 0);
+        glVertex3f(arrowX * 0.7f + arrowY * 0.3f, arrowY * 0.7f - arrowX * 0.3f, 0);
+        glVertex3f(arrowX * 0.7f - arrowY * 0.3f, arrowY * 0.7f + arrowX * 0.3f, 0);
+        glEnd();
+        
+        glColor3f(1.0f, 0.0f, 0.0f);
+        glBegin(GL_TRIANGLES);
+        glVertex3f(0, compassRadius, 0);
+        glVertex3f(-3.0f, compassRadius - 5.0f, 0);
+        glVertex3f(3.0f, compassRadius - 5.0f, 0);
+        glEnd();
+        
+        glColor3f(1.0f, 0.0f, 0.0f);
+        drawText3D(-1.5f, compassRadius - 10.0f, 0.1f, "N");
+        
+        glPopMatrix();
+        
+        glLineWidth(1.0f);
+        glDisable(GL_BLEND);
+        glEnable(GL_LIGHTING);
+    }
+    
+    void drawPulseRing(float radius, float pulse, const Vector3D& color) {
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        
+        glColor4f(color.x, color.y, color.z, pulse * 0.3f);
+        glLineWidth(3.0f * pulse);
+        
+        glBegin(GL_LINE_LOOP);
+        int segments = 24;
+        for (int i = 0; i < segments; i++) {
+            float angle = 2.0f * M_PI * i / segments;
+            float x = cos(angle) * radius;
+            float y = sin(angle) * radius;
+            glVertex3f(x, y, 0);
+        }
+        glEnd();
+        
+        glLineWidth(1.0f);
+        glDisable(GL_BLEND);
+        glEnable(GL_LIGHTING);
+    }
+    
+    void drawTrail(const Drone& drone, const Vector3D& cameraPos) {
+        if (!showTrails) return;
+        
+        if (drone.getIsPrimary()) {
+            drawPrimaryDroneTrail(drone);
+        } else {
+            drawRegularDroneTrail(drone, cameraPos);
+        }
+    }
+    
+    void drawPrimaryDroneTrail(const Drone& drone) {
+    const auto& trail = drone.getTrail();
+    if (trail.size() < 2) return;
+    
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    
+    // ===== THINNER TRAIL LINE =====
+    glLineWidth(2.5f);
+    glBegin(GL_LINE_STRIP);
+    
+    // Simple gradient trail
+    for (size_t i = 0; i < trail.size(); i++) {
+        float t = (float)i / trail.size();
+        float alpha = 0.2f + t * 0.3f;  // Fade out older points
+        
+        glColor4f(0.0f, 0.8f, 0.3f, alpha);
+        glVertex3f(trail[i].x, trail[i].y, trail[i].z);
+    }
+    glEnd();
+    
+    // ===== OCCASIONAL BREADCRUMBS =====
+    glPointSize(8.0f);  // Reduced from 15.0f
+    glBegin(GL_POINTS);
+    
+    for (size_t i = 0; i < trail.size(); i += 50) {  // Less frequent (was 20)
+        float t = (float)i / trail.size();
+        float alpha = 0.5f + t * 0.3f;
+        
+        glColor4f(0.2f, 1.0f, 0.3f, alpha);
+        glVertex3f(trail[i].x, trail[i].y, trail[i].z);
+    }
+    glEnd();
+    
+    // ===== TIME MARKERS (ONLY KEY POINTS) =====
+    if (trail.size() > 100) {
+        glPointSize(12.0f);  // Reduced from 20.0f
         glBegin(GL_POINTS);
-        for (size_t i = 0; i < trail.size(); i += 5) {
-            float alpha = pow((float)i / trail.size(), 1.5f);
-            if (drone.getIsPrimary()) {
-                glColor4f(color.x, color.y, color.z, alpha * 1.0f);
-            } else {
-                glColor4f(color.x, color.y, color.z, alpha * 0.8f);
-            }
+        
+        // Only mark every 200 points (was 100)
+        for (size_t i = 0; i < trail.size(); i += 200) {
+            glColor4f(1.0f, 1.0f, 0.0f, 0.8f);
+            glVertex3f(trail[i].x, trail[i].y, trail[i].z);
+        }
+        glEnd();
+    }
+    
+    // ===== THIN SHADOW ON GROUND =====
+    glLineWidth(3.0f);  // Reduced from 8.0f
+    glBegin(GL_LINE_STRIP);
+    glColor4f(0.0f, 0.4f, 0.0f, 0.1f);
+    
+    // Sample fewer points for shadow
+    for (size_t i = 0; i < trail.size(); i += 10) {
+        glVertex3f(trail[i].x, trail[i].y, 0.1f);
+    }
+    glEnd();
+    
+    glLineWidth(1.0f);
+    glPointSize(1.0f);
+    glDisable(GL_BLEND);
+    glEnable(GL_LIGHTING);
+}
+    
+    void drawRegularDroneTrail(const Drone& drone, const Vector3D& cameraPos) {
+        float distance = drone.getPosition().distance(cameraPos);
+        if (distance > Config::LOD_DISTANCE_MID) return;
+        
+        const auto& trail = drone.getTrail();
+        if (trail.size() < 2) return;
+        
+        Vector3D color = drone.getColor();
+        
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        glLineWidth(1.5f);
+        
+        glBegin(GL_LINE_STRIP);
+        for (size_t i = 0; i < trail.size(); i++) {
+            float alpha = pow((float)i / trail.size(), 2.0f);
+            glColor4f(color.x, color.y, color.z, alpha * 0.6f);
             glVertex3f(trail[i].x, trail[i].y, trail[i].z);
         }
         glEnd();
@@ -1380,79 +1666,92 @@ private:
     }
     
     void drawTrajectory(const Drone& drone, const Vector3D& cameraPos) {
-        float distance = drone.getPosition().distance(cameraPos);
-        if (distance > Config::LOD_DISTANCE_MID) return;
+        if (!showTrajectories) return;
         
+        if (drone.getIsPrimary()) {
+            drawPrimaryDroneTrajectory(drone);
+        } else {
+            float distance = drone.getPosition().distance(cameraPos);
+            if (distance > Config::LOD_DISTANCE_MID) return;
+            
+            const Trajectory& traj = drone.getTrajectory();
+            const auto& waypoints = traj.getWaypoints();
+            if (waypoints.size() < 2) return;
+            
+            glDisable(GL_LIGHTING);
+            glColor4f(0.5f, 0.5f, 0.5f, 0.3f);
+            glLineWidth(1.0f);
+            
+            glBegin(GL_LINE_STRIP);
+            for (const auto& wp : waypoints) {
+                glVertex3f(wp.position.x, wp.position.y, wp.position.z);
+            }
+            glEnd();
+            
+            glEnable(GL_LIGHTING);
+        }
+    }
+    
+    void drawPrimaryDroneTrajectory(const Drone& drone) {
         const Trajectory& traj = drone.getTrajectory();
         const auto& waypoints = traj.getWaypoints();
         if (waypoints.size() < 2) return;
         
-        Vector3D color = drone.getColor();
-        
         glDisable(GL_LIGHTING);
-        if (drone.getIsPrimary()) {
-            glColor4f(color.x * 0.8f, color.y * 0.8f, color.z * 0.8f, 0.6f);
-            glLineWidth(2.0f);
-        } else {
-            glColor4f(color.x * 0.5f, color.y * 0.5f, color.z * 0.5f, 0.4f);
-            glLineWidth(1.5f);
-        }
+        glEnable(GL_BLEND);
         
+        // Future trajectory line
+        glColor4f(0.0f, 0.8f, 1.0f, 0.6f);
+        glLineWidth(3.0f);
         glEnable(GL_LINE_STIPPLE);
-        glLineStipple(2, 0xAAAA);
+        glLineStipple(3, 0xAAAA);
         
-        // Draw sampled trajectory (don't draw all waypoints)
-        int sampleStep = std::max(1, (int)waypoints.size() / 100);
         glBegin(GL_LINE_STRIP);
-        for (size_t i = 0; i < waypoints.size(); i += sampleStep) {
-            glVertex3f(waypoints[i].position.x, waypoints[i].position.y, waypoints[i].position.z);
-        }
-        // Ensure last point is drawn
-        if (!waypoints.empty() && (waypoints.size() - 1) % sampleStep != 0) {
-            glVertex3f(waypoints.back().position.x, waypoints.back().position.y, waypoints.back().position.z);
+        
+        float currentTime = drone.getCurrentTime();
+        for (float t = 0; t <= 20.0f; t += 2.0f) {
+            Vector3D futurePos = traj.getPositionAtTime(currentTime + t);
+            glVertex3f(futurePos.x, futurePos.y, futurePos.z);
         }
         glEnd();
         
         glDisable(GL_LINE_STIPPLE);
-        glLineWidth(1.0f);
         
-        // Draw waypoint markers only for close drones
-        if (distance < Config::LOD_DISTANCE_NEAR) {
-            int currentIdx = traj.getCurrentWaypointIndex();
-            for (size_t i = 0; i < waypoints.size(); i += sampleStep * 10) {
-                const auto& wp = waypoints[i];
+        // Waypoint markers
+        int currentIdx = traj.getCurrentWaypointIndex();
+        for (size_t i = 0; i < waypoints.size(); i++) {
+            const auto& wp = waypoints[i];
+            
+            glPushMatrix();
+            glTranslatef(wp.position.x, wp.position.y, wp.position.z);
+            
+            if ((int)i == currentIdx) {
+                glColor4f(1.0f, 1.0f, 0.0f, 0.9f);
+                glutSolidSphere(8.0f, 16, 16);
                 
-                glPushMatrix();
-                glTranslatef(wp.position.x, wp.position.y, wp.position.z);
-                
-                if (i < currentIdx) {
-                    glColor4f(0.3f, 0.3f, 0.3f, 0.4f);
-                } else if (i == currentIdx) {
-                    if (drone.getIsPrimary()) {
-                        glColor4f(1.0f, 1.0f, 0.0f, 0.9f);
-                    } else {
-                        glColor4f(1.0f, 1.0f, 0.0f, 0.7f);
-                    }
-                } else {
-                    if (drone.getIsPrimary()) {
-                        glColor4f(color.x, color.y, color.z, 0.7f);
-                    } else {
-                        glColor4f(color.x, color.y, color.z, 0.5f);
-                    }
-                }
-                
-                glutWireSphere(drone.getIsPrimary() ? 2.0f : 1.5f, 8, 8);
-                glPopMatrix();
+                glColor3f(1.0f, 1.0f, 1.0f);
+                std::ostringstream wpText;
+                wpText << "WP " << i;
+                drawText3D(-5, -5, 10, wpText.str());
+            } else if ((int)i > currentIdx) {
+                glColor4f(0.0f, 1.0f, 0.0f, 0.7f);
+                glutWireSphere(5.0f, 12, 12);
+            } else {
+                glColor4f(0.5f, 0.5f, 0.5f, 0.4f);
+                glutWireSphere(3.0f, 8, 8);
             }
+            
+            glPopMatrix();
         }
         
+        glLineWidth(1.0f);
+        glDisable(GL_BLEND);
         glEnable(GL_LIGHTING);
     }
     
     void drawCollisionZone(const CollisionData& collision, float currentTime) {
         Vector3D pos = collision.location;
         
-        // Only draw if collision time is close to current time
         if (std::abs(collision.time - currentTime) > 2.0f) return;
         
         glPushMatrix();
@@ -1460,7 +1759,6 @@ private:
         
         float red, green, blue, alpha;
         
-        // Set color based on severity
         if (collision.severity == "HIGH") {
             red = 1.0f;
             green = 0.0f;
@@ -1471,7 +1769,7 @@ private:
             green = 0.5f;
             blue = 0.0f;
             alpha = 0.25f;
-        } else { // LOW
+        } else {
             red = 1.0f;
             green = 1.0f;
             blue = 0.0f;
@@ -1481,15 +1779,12 @@ private:
         glDisable(GL_LIGHTING);
         glEnable(GL_BLEND);
         
-        // Outer glow
         glColor4f(red, green, blue, alpha * 0.5f);
         glutSolidSphere(20.0f, 16, 16);
         
-        // Inner core
         glColor4f(red, green, blue, alpha);
         glutSolidSphere(15.0f, 16, 16);
         
-        // Pulsing effect
         static float pulse = 0.0f;
         pulse += 0.15f;
         float pulseSize = 18.0f + sin(pulse) * 3.0f;
@@ -1497,11 +1792,9 @@ private:
         glColor4f(red, green, blue, alpha * 0.4f);
         glutWireSphere(pulseSize, 12, 12);
         
-        // Warning rings
         glColor4f(1.0f, 1.0f, 1.0f, 0.6f);
         glutWireSphere(16.0f, 8, 8);
         
-        // Draw line between primary and conflicting drone
         glBegin(GL_LINES);
         glColor4f(1.0f, 0.5f, 0.0f, 0.8f);
         glVertex3f(collision.primary_location.x - pos.x, 
@@ -1512,13 +1805,11 @@ private:
                   collision.conflict_location.z - pos.z);
         glEnd();
         
-        // Draw distance text
         glColor4f(1.0f, 1.0f, 1.0f, 0.8f);
         std::ostringstream distText;
         distText << std::fixed << std::setprecision(1) << collision.distance << "m";
         drawText3D(-5, -5, 10, distText.str());
         
-        // Draw time text
         std::ostringstream timeText;
         timeText << "t=" << std::fixed << std::setprecision(1) << collision.time << "s";
         drawText3D(-5, -5, 15, timeText.str());
@@ -1529,165 +1820,315 @@ private:
     }
     
     void drawHUD(const std::vector<std::unique_ptr<Drone>>& drones, 
-                 const JSONCollisionLoader& collisionLoader, float simTime) {
-        glMatrixMode(GL_PROJECTION);
-        glPushMatrix();
-        glLoadIdentity();
-        gluOrtho2D(0, 1280, 0, 720);
+             const JSONCollisionLoader& collisionLoader, float simTime) {
+    // Switch to 2D orthographic projection for HUD
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0, 1280, 0, 720);
+    
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Background gradient
+    glBegin(GL_QUADS);
+    glColor4f(0.0f, 0.05f, 0.1f, 0.85f);
+    glVertex2f(0, 720);
+    glVertex2f(1280, 720);
+    glColor4f(0.0f, 0.1f, 0.15f, 0.85f);
+    glVertex2f(1280, 680);
+    glVertex2f(0, 680);
+    glEnd();
+    
+    // Top border
+    glLineWidth(3.0f);
+    glBegin(GL_LINES);
+    glColor4f(0.0f, 0.8f, 1.0f, 0.8f);
+    glVertex2f(0, 680);
+    glVertex2f(1280, 680);
+    glEnd();
+    glLineWidth(1.0f);
+    
+    // Statistics
+    int activeDrones = 0;
+    int primaryDrones = 0;
+    float avgAltitude = 0;
+    
+    for (const auto& drone : drones) {
+        if (drone->getIsActive()) {
+            activeDrones++;
+            avgAltitude += drone->getAltitude();
+            if (drone->getIsPrimary()) primaryDrones++;
+        }
+    }
+    
+    if (activeDrones > 0) avgAltitude /= activeDrones;
+    
+    glColor3f(0.8f, 0.9f, 1.0f);
+    
+    // Left side: Time and drones
+    std::ostringstream topLeft;
+    topLeft << "🕒 TIME: " << std::fixed << std::setprecision(1) << simTime << "s";
+    topLeft << "   🚁 DRONES: " << activeDrones << "/" << drones.size();
+    topLeft << " (Primary: " << primaryDrones << ")";
+    topLeft << "   📊 FPS: " << std::setprecision(0) << currentFPS;
+    drawText(20, 700, topLeft.str(), GLUT_BITMAP_HELVETICA_12);
+    
+    // Right side: Collision status
+    auto collisions = collisionLoader.getAllCollisions();
+    auto currentCollisions = collisionLoader.getCollisionsAtTime(simTime, 1.0f);
+    
+    std::string statusText;
+    Vector3D statusColor(0.8f, 0.8f, 0.8f);
+    
+    if (!currentCollisions.empty()) {
+        statusText = "⚠ " + std::to_string(currentCollisions.size()) + " ACTIVE COLLISIONS";
+        statusColor = Vector3D(1.0f, 0.3f, 0.3f);
+    } else if (!collisions.empty()) {
+        int upcoming = 0;
+        for (const auto& c : collisions) {
+            if (c.time > simTime && c.time <= simTime + 10.0f) {
+                upcoming++;
+            }
+        }
+        if (upcoming > 0) {
+            statusText = "🔶 " + std::to_string(upcoming) + " UPCOMING COLLISIONS";
+            statusColor = Vector3D(1.0f, 0.8f, 0.3f);
+        } else {
+            statusText = "✅ ALL CLEAR";
+            statusColor = Vector3D(0.3f, 1.0f, 0.3f);
+        }
+    } else {
+        statusText = "📁 NO COLLISION DATA LOADED";
+        statusColor = Vector3D(0.7f, 0.7f, 0.9f);
+    }
+    
+    glColor3f(statusColor.x, statusColor.y, statusColor.z);
+    drawText(1000, 700, statusText, GLUT_BITMAP_HELVETICA_12);
+    
+    // ============================================
+    // 2. PRIMARY DRONE STATUS PANEL 
+    // ============================================
+    const Drone* primaryDrone = nullptr;
+    for (const auto& drone : drones) {
+        if (drone->getIsPrimary()) {
+            primaryDrone = drone.get();
+            break;
+        }
+    }
+    
+    if (primaryDrone) {
+        float panelX = 20;
+        float panelY = 680 - 140;  // Positioned below top bar
+        float panelWidth = 380;
+        float panelHeight = 130;
         
-        glMatrixMode(GL_MODELVIEW);
-        glPushMatrix();
-        glLoadIdentity();
-        
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_LIGHTING);
-        glEnable(GL_BLEND);
-        
-        // Minimal top bar
+        // Panel background with border
+        glColor4f(0.0f, 0.1f, 0.05f, 0.85f);
         glBegin(GL_QUADS);
-        glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
-        glVertex2f(0, 720);
-        glVertex2f(1280, 720);
-        glColor4f(0.0f, 0.0f, 0.0f, 0.3f);
-        glVertex2f(1280, 690);
-        glVertex2f(0, 690);
+        glVertex2f(panelX, panelY);
+        glVertex2f(panelX + panelWidth, panelY);
+        glVertex2f(panelX + panelWidth, panelY + panelHeight);
+        glVertex2f(panelX, panelY + panelHeight);
         glEnd();
         
-        // Time and drone count
-        int activeDrones = 0;
-        int primaryDrones = 0;
-        for (const auto& drone : drones) {
-            if (drone->getIsActive()) {
-                activeDrones++;
-                if (drone->getIsPrimary()) primaryDrones++;
-            }
-        }
+        // Panel border
+        glLineWidth(2.0f);
+        glColor4f(0.0f, 0.8f, 0.3f, 0.9f);
+        glBegin(GL_LINE_LOOP);
+        glVertex2f(panelX, panelY);
+        glVertex2f(panelX + panelWidth, panelY);
+        glVertex2f(panelX + panelWidth, panelY + panelHeight);
+        glVertex2f(panelX, panelY + panelHeight);
+        glEnd();
+        glLineWidth(1.0f);
         
-        glColor3f(1.0f, 1.0f, 1.0f);
-        std::ostringstream topInfo;
-        topInfo << "Time: " << std::fixed << std::setprecision(1) << simTime << "s";
-        topInfo << " | Drones: " << activeDrones << "/" << drones.size();
-        topInfo << " (Primary: " << primaryDrones << ")";
-        topInfo << " | FPS: " << std::setprecision(0) << currentFPS;
-        drawText(10, 700, topInfo.str(), GLUT_BITMAP_HELVETICA_12);
+        // Title
+        glColor3f(0.0f, 1.0f, 0.5f);
+        drawText(panelX + 15, panelY + panelHeight - 25, 
+                "🚁 PRIMARY DRONE STATUS", GLUT_BITMAP_HELVETICA_12);
         
-        // Collision status (right side)
-        auto collisions = collisionLoader.getAllCollisions();
-        auto currentCollisions = collisionLoader.getCollisionsAtTime(simTime, 1.0f);
+        // Separator line
+        glLineWidth(1.0f);
+        glBegin(GL_LINES);
+        glColor4f(0.0f, 0.6f, 0.2f, 0.6f);
+        glVertex2f(panelX + 10, panelY + panelHeight - 35);
+        glVertex2f(panelX + panelWidth - 10, panelY + panelHeight - 35);
+        glEnd();
         
-        std::string statusText;
-        Vector3D statusColor(0.8f, 0.8f, 0.8f);
+        // Position info
+        Vector3D pos = primaryDrone->getPosition();
+        Vector3D vel = primaryDrone->getVelocity();
         
-        if (!currentCollisions.empty()) {
-            statusText = "✗ " + std::to_string(currentCollisions.size()) + " ACTIVE COLLISIONS";
-            statusColor = Vector3D(1.0f, 0.3f, 0.3f);
-        } else if (!collisions.empty()) {
-            // Count upcoming collisions in next 10 seconds
-            int upcoming = 0;
-            for (const auto& c : collisions) {
-                if (c.time > simTime && c.time <= simTime + 10.0f) {
-                    upcoming++;
-                }
-            }
-            if (upcoming > 0) {
-                statusText = "⚠ " + std::to_string(upcoming) + " UPCOMING COLLISIONS";
-                statusColor = Vector3D(1.0f, 0.8f, 0.3f);
-            } else {
-                statusText = "✓ ALL CLEAR";
-                statusColor = Vector3D(0.3f, 1.0f, 0.3f);
-            }
-        } else {
-            statusText = "✓ NO COLLISION DATA";
-            statusColor = Vector3D(0.7f, 0.7f, 0.9f);
-        }
+        float textY = panelY + panelHeight - 55;
         
-        glColor3f(statusColor.x, statusColor.y, statusColor.z);
-        drawText(1000, 700, statusText, GLUT_BITMAP_HELVETICA_12);
+        std::ostringstream info;
+        glColor3f(0.9f, 0.9f, 0.9f);
         
-        // File info
-        glColor3f(0.7f, 0.7f, 0.9f);
-        std::ostringstream fileInfo;
-        fileInfo << "Trajectory: " << currentTrajectoryFile;
-        drawText(10, 680, fileInfo.str(), GLUT_BITMAP_HELVETICA_10);
+        info.str(""); info.clear();
+        info << "📍 Position: X=" << std::fixed << std::setprecision(1) << pos.x 
+             << "m  Y=" << pos.y << "m  Z=" << pos.z << "m";
+        drawText(panelX + 20, textY, info.str(), GLUT_BITMAP_HELVETICA_10);
         
-        if (!currentAnalysisFile.empty()) {
-            glColor3f(0.7f, 0.9f, 0.7f);
-            std::ostringstream analysisInfo;
-            analysisInfo << "Analysis: " << currentAnalysisFile << " (" << collisions.size() << " collisions)";
-            drawText(10, 670, analysisInfo.str(), GLUT_BITMAP_HELVETICA_10);
-        }
+        info.str(""); info.clear();
+        info << "⚡ Velocity: " << std::setprecision(1) << primaryDrone->getSpeed() 
+             << " m/s  (" << std::setprecision(1) << vel.x << ", " 
+             << std::setprecision(1) << vel.y << ", " 
+             << std::setprecision(1) << vel.z << ")";
+        drawText(panelX + 20, textY - 15, info.str(), GLUT_BITMAP_HELVETICA_10);
         
-        // Speed and time info
-        glColor3f(0.9f, 0.9f, 0.7f);
-        std::ostringstream speedInfo;
-        speedInfo << "Speed: " << std::fixed << std::setprecision(1) << timeScale << "x";
-        drawText(10, 660, speedInfo.str(), GLUT_BITMAP_HELVETICA_10);
+        info.str(""); info.clear();
+        info << "🕒 Trajectory Time: " << std::setprecision(1) 
+             << primaryDrone->getCurrentTime() << "s";
+        drawText(panelX + 20, textY - 30, info.str(), GLUT_BITMAP_HELVETICA_10);
         
-        // Primary drone info
-        for (const auto& drone : drones) {
-            if (drone->getIsPrimary() && drone->getIsActive()) {
-                glColor3f(0.0f, 1.0f, 0.0f);
-                std::ostringstream primaryInfo;
-                primaryInfo << "Primary Drone: " << drone->getIdString();
-                primaryInfo << " | Pos: (" << std::fixed << std::setprecision(1) 
-                           << drone->getPosition().x << ", " 
-                           << drone->getPosition().y << ", " 
-                           << drone->getPosition().z << ")";
-                primaryInfo << " | Speed: " << std::setprecision(1) << drone->getSpeed() << " m/s";
-                drawText(10, 650, primaryInfo.str(), GLUT_BITMAP_HELVETICA_10);
-                break;
-            }
-        }
-        
-        // Current collision info
-        if (!currentCollisions.empty()) {
-            float notifX = 1280 - 300;
-            float notifY = 650;
-            
-            glBegin(GL_QUADS);
-            glColor4f(0.3f, 0.0f, 0.0f, 0.8f);
-            glVertex2f(notifX, notifY + 50);
-            glVertex2f(notifX + 290, notifY + 50);
-            glVertex2f(notifX + 290, notifY);
-            glVertex2f(notifX, notifY);
-            glEnd();
-            
-            glColor3f(1.0f, 0.5f, 0.5f);
-            drawText(notifX + 10, notifY + 35, "ACTIVE COLLISION ALERT!", GLUT_BITMAP_HELVETICA_12);
-            
-            // Show first collision details
-            const auto& collision = currentCollisions[0];
-            glColor3f(1.0f, 1.0f, 1.0f);
-            std::ostringstream collisionMsg;
-            collisionMsg << "Primary vs " << collision.conflicting_drone_id;
-            drawText(notifX + 10, notifY + 20, collisionMsg.str(), GLUT_BITMAP_HELVETICA_10);
-            
-            std::ostringstream detailMsg;
-            detailMsg << "Distance: " << std::fixed << std::setprecision(1) << collision.distance << "m";
-            detailMsg << " | Severity: " << collision.severity;
-            drawText(notifX + 10, notifY + 10, detailMsg.str(), GLUT_BITMAP_HELVETICA_10);
-        }
-        
-        // Controls hint at bottom
-        glColor4f(1.0f, 1.0f, 1.0f, 0.6f);
-        drawText(10, 15, "[H] HUD  [G] Grid  [T] Trails  [C] Collisions  [L] Trajectories  [B] Labels", GLUT_BITMAP_HELVETICA_10);
-        drawText(10, 5, "[Mouse] Rotate/Zoom  [Wheel] Zoom  [1-4] Speed  [R] Reset  [S] Status", GLUT_BITMAP_HELVETICA_10);
-        
-        glDisable(GL_BLEND);
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_LIGHTING);
-        
-        glMatrixMode(GL_PROJECTION);
-        glPopMatrix();
-        glMatrixMode(GL_MODELVIEW);
-        glPopMatrix();
+        info.str(""); info.clear();
+        info << "🎯 Next Waypoint: " << (primaryDrone->getTrajectory().getCurrentWaypointIndex() + 1) 
+             << "/" << primaryDrone->getTrajectory().getWaypoints().size();
+        drawText(panelX + 20, textY - 45, info.str(), GLUT_BITMAP_HELVETICA_10);
     }
+    
+    // ============================================
+    // 3. COLLISION ALERT PANEL (RIGHT SIDE)
+    // ============================================
+    if (!currentCollisions.empty()) {
+        float alertX = 1280 - 320;
+        float alertY = 680 - 100;
+        float alertWidth = 300;
+        float alertHeight = 90;
+        
+        // Alert background (pulsing red)
+        float pulse = 0.5f * sin(simTime * 10.0f) + 0.5f;
+        glColor4f(0.5f + pulse * 0.3f, 0.1f, 0.1f, 0.9f);
+        glBegin(GL_QUADS);
+        glVertex2f(alertX, alertY);
+        glVertex2f(alertX + alertWidth, alertY);
+        glVertex2f(alertX + alertWidth, alertY + alertHeight);
+        glVertex2f(alertX, alertY + alertHeight);
+        glEnd();
+        
+        // Alert border
+        glLineWidth(3.0f);
+        glColor4f(1.0f, 0.3f, 0.3f, 0.9f + pulse * 0.1f);
+        glBegin(GL_LINE_LOOP);
+        glVertex2f(alertX, alertY);
+        glVertex2f(alertX + alertWidth, alertY);
+        glVertex2f(alertX + alertWidth, alertY + alertHeight);
+        glVertex2f(alertX, alertY + alertHeight);
+        glEnd();
+        glLineWidth(1.0f);
+        
+        // Alert text
+        glColor3f(1.0f, 1.0f, 1.0f);
+        drawText(alertX + 10, alertY + alertHeight - 25, 
+                "⚠ COLLISION ALERT!", GLUT_BITMAP_HELVETICA_12);
+        
+        const auto& collision = currentCollisions[0];
+        glColor3f(1.0f, 0.9f, 0.9f);
+        
+        std::ostringstream alertText;
+        alertText << "Primary vs " << collision.conflicting_drone_id;
+        drawText(alertX + 15, alertY + alertHeight - 45, 
+                alertText.str(), GLUT_BITMAP_HELVETICA_10);
+        
+        alertText.str(""); alertText.clear();
+        alertText << "Distance: " << std::fixed << std::setprecision(1) 
+                 << collision.distance << "m";
+        alertText << "  Severity: " << collision.severity;
+        drawText(alertX + 15, alertY + alertHeight - 60, 
+                alertText.str(), GLUT_BITMAP_HELVETICA_10);
+    }
+    
+    // ============================================
+    // 4. FILE INFO PANEL (BOTTOM LEFT)
+    // ============================================
+    float infoX = 20;
+    float infoY = 40;
+    float infoWidth = 500;
+    float infoHeight = 50;
+    
+    glColor4f(0.0f, 0.05f, 0.1f, 0.7f);
+    glBegin(GL_QUADS);
+    glVertex2f(infoX, infoY);
+    glVertex2f(infoX + infoWidth, infoY);
+    glVertex2f(infoX + infoWidth, infoY + infoHeight);
+    glVertex2f(infoX, infoY + infoHeight);
+    glEnd();
+    
+    glColor3f(0.7f, 0.8f, 1.0f);
+    std::ostringstream fileInfo;
+    fileInfo << "📁 Trajectory: " << currentTrajectoryFile;
+    drawText(infoX + 10, infoY + 35, fileInfo.str(), GLUT_BITMAP_HELVETICA_10);
+    
+    if (!currentAnalysisFile.empty()) {
+        glColor3f(0.7f, 1.0f, 0.8f);
+        std::ostringstream analysisInfo;
+        analysisInfo << "📊 Analysis: " << currentAnalysisFile 
+                    << " (" << collisions.size() << " collisions)";
+        drawText(infoX + 10, infoY + 20, analysisInfo.str(), GLUT_BITMAP_HELVETICA_10);
+    }
+    
+    glColor3f(1.0f, 1.0f, 0.8f);
+    std::ostringstream speedInfo;
+    speedInfo << "⚡ Simulation Speed: " << std::fixed << std::setprecision(1) 
+             << timeScale << "x";
+    drawText(infoX + 10, infoY + 5, speedInfo.str(), GLUT_BITMAP_HELVETICA_10);
+    
+    // ============================================
+    // 5. CONTROLS HINT (BOTTOM RIGHT)
+    // ============================================
+    float controlsX = 1280 - 400;
+    float controlsY = 20;
+    
+    glColor4f(0.0f, 0.05f, 0.1f, 0.7f);
+    glBegin(GL_QUADS);
+    glVertex2f(controlsX, controlsY);
+    glVertex2f(1280, controlsY);
+    glVertex2f(1280, controlsY + 35);
+    glVertex2f(controlsX, controlsY + 35);
+    glEnd();
+    
+    glColor4f(0.8f, 0.9f, 1.0f, 0.9f);
+    std::string line1 = "[H] HUD  [G] Grid  [T] Trails  [C] Collisions  [L] Trajectories";
+    std::string line2 = "[1-4] Speed  [SPACE] Pause  [R] Reset  [V] Camera  [S] Status";
+    
+    drawText(controlsX + 10, controlsY + 25, line1, GLUT_BITMAP_HELVETICA_10);
+    drawText(controlsX + 10, controlsY + 10, line2, GLUT_BITMAP_HELVETICA_10);
+    
+    // ============================================
+    // 6. SIMULATION STATS (TOP RIGHT)
+    // ============================================
+    float statsX = 1280 - 250;
+    float statsY = 680 - 30;
+    
+    glColor3f(0.6f, 0.8f, 1.0f);
+    std::ostringstream stats;
+    stats << "📈 Avg Altitude: " << std::fixed << std::setprecision(1) 
+          << avgAltitude << "m";
+    drawText(statsX, statsY, stats.str(), GLUT_BITMAP_HELVETICA_10);
+    
+    // Restore OpenGL state
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
     
 public:
     OpenGLRenderer() 
         : gridSize(Config::GRID_SIZE), axisLength(200.0f), showGrid(true), 
-          showTrajectories(false), showConflicts(true), showTrails(false),
-          showHUD(true), showDroneLabels(false), cameraAngleX(45.0f), 
+          showTrajectories(false), showConflicts(true), showTrails(true), // Trails ON by default
+          showHUD(true), showDroneLabels(true), cameraAngleX(45.0f), 
           cameraAngleY(-45.0f), cameraDistance(1000.0f),
           cameraTarget(0, 0, 150), frameCount(0), fpsTimer(0), currentFPS(0),
           zoomVelocity(0), rotVelocityX(0), rotVelocityY(0),
@@ -1699,12 +2140,10 @@ public:
     }
     
     void updateCameraInertia(float deltaTime) {
-        // Apply damping to camera inertia
         zoomVelocity *= 0.9f;
         rotVelocityX *= 0.8f;
         rotVelocityY *= 0.8f;
         
-        // Apply remaining velocity
         if (fabs(zoomVelocity) > 0.1f) {
             cameraDistance += zoomVelocity * deltaTime * 60.0f;
             if (cameraDistance < 100.0f) cameraDistance = 100.0f;
@@ -1788,7 +2227,7 @@ public:
             }
         }
         
-        // Draw collision zones (from JSON file)
+        // Draw collision zones
         if (showConflicts) {
             auto collisions = collisionLoader.getAllCollisions();
             for (const auto& collision : collisions) {
@@ -1908,39 +2347,35 @@ public:
             json root;
             file >> root;
             
-            // Check if this is a primary drone file or regular drone file
             if (root.is_object() && root.contains("id") && 
                 root["id"].get<std::string>() == "primary_drone") {
                 // Load primary drone
-                if (!loadPrimary) return false; // Not loading primary drones in this call
+                if (!loadPrimary) return false;
                 
                 std::cout << "Loading primary drone from: " << filename << std::endl;
                 
-                auto drone = std::make_unique<Drone>(0, Config::PRIMARY_DRONE_COLOR(), true);
+                auto drone = std::make_unique<Drone>(0, Vector3D(0.0f, 1.0f, 0.0f), true);
                 
                 Trajectory traj;
                 json waypoints = root["waypoints"];
                 
-                // Load all waypoints for primary drone
                 for (const auto& wp : waypoints) {
                     float time = wp["time"].get<float>();
                     float x = wp["x"].get<float>();
                     float y = wp["y"].get<float>();
                     float z = wp["z"].get<float>();
                     
-                    // Primary drone uses precise waypoints
                     traj.addWaypoint(Waypoint(Vector3D(x, y, z), time, 1.0f));
                 }
                 
                 drone->setTrajectory(traj, true);
-                drones.insert(drones.begin(), std::move(drone)); // Insert at beginning
+                drones.insert(drones.begin(), std::move(drone));
                 std::cout << "Primary drone loaded with " << waypoints.size() << " waypoints" << std::endl;
                 return true;
             } else {
-                // Load regular drones from drone_waypoints.json
-                if (loadPrimary) return false; // Not loading regular drones in this call
+                // Load regular drones
+                if (loadPrimary) return false;
                 
-                // Get metadata
                 json metadata = root["metadata"];
                 int totalDrones = metadata["num_drones"].get<int>();
                 float totalTime = metadata["total_time"].get<float>();
@@ -1949,10 +2384,8 @@ public:
                 std::cout << "Loading " << totalDrones << " drones from JSON..." << std::endl;
                 std::cout << "Total time: " << totalTime << "s, Time step: " << timeStep << "s" << std::endl;
                 
-                // Limit number of drones for performance
                 int dronesToLoad = std::min(totalDrones, maxDrones);
                 
-                // Load drones
                 json jsonDrones = root["drones"];
                 int loadedCount = 0;
                 
@@ -1960,7 +2393,6 @@ public:
                     json droneData = jsonDrones[i];
                     std::string droneId = droneData["id"].get<std::string>();
                     
-                    // Extract drone number from ID (e.g., "drone_4" -> 4)
                     int droneNum = 0;
                     if (droneId.find("drone_") != std::string::npos) {
                         droneNum = std::stoi(droneId.substr(6));
@@ -1971,15 +2403,9 @@ public:
                     Trajectory traj;
                     json waypoints = droneData["waypoints"];
                     
-                    // Calculate optimal sampling - about 200 waypoints max per drone
                     int wpCount = waypoints.size();
-                    int targetWaypoints = 200;  // Maximum waypoints per drone for performance
+                    int targetWaypoints = 200;
                     int sampleStep = std::max(1, wpCount / targetWaypoints);
-                    
-                    if (i < 5) { // Only print for first few drones
-                        std::cout << "Drone " << droneId << ": " << wpCount << " waypoints, sampling every " 
-                                 << sampleStep << " waypoints" << std::endl;
-                    }
                     
                     for (int w = 0; w < wpCount; w += sampleStep) {
                         const auto& wp = waypoints[w];
@@ -1992,7 +2418,6 @@ public:
                         traj.addWaypoint(Waypoint(Vector3D(x, y, z), time, arrivalRadius));
                     }
                     
-                    // Ensure last waypoint is included
                     if (!waypoints.empty()) {
                         const auto& lastWp = waypoints[wpCount - 1];
                         float time = lastWp["time"].get<float>();
@@ -2010,7 +2435,6 @@ public:
                     drones.push_back(std::move(drone));
                     loadedCount++;
                     
-                    // Progress update
                     if (loadedCount % 10 == 0) {
                         std::cout << "Loaded " << loadedCount << " drones..." << std::endl;
                     }
@@ -2083,7 +2507,7 @@ public:
         if (!droneFile.empty()) {
             if (trajectoryLoader.loadFromJSON(droneFile, drones, Config::MAX_DRONES, false)) {
                 droneCount = drones.size();
-                if (!primaryFile.empty()) droneCount--; // Don't count primary drone
+                if (!primaryFile.empty()) droneCount--;
                 renderer.setTrajectoryFile("Drones: " + droneFile);
                 std::cout << "✓ Regular drones loaded from: " << droneFile << std::endl;
             } else {
@@ -2115,10 +2539,9 @@ public:
         
         if (trajectoryLoader.loadFromJSON(filename, drones, Config::MAX_DRONES, false)) {
             droneCount = drones.size();
-            // Find primary drone
             for (const auto& drone : drones) {
                 if (drone->getIsPrimary()) {
-                    droneCount--; // Don't count primary drone
+                    droneCount--;
                     break;
                 }
             }
@@ -2130,12 +2553,10 @@ public:
     }
     
     bool loadPrimaryTrajectory(const std::string& filename) {
-        // Remove existing primary drone if any
         auto it = std::remove_if(drones.begin(), drones.end(), 
             [](const std::unique_ptr<Drone>& d) { return d->getIsPrimary(); });
         drones.erase(it, drones.end());
         
-        // Insert primary drone at beginning
         if (trajectoryLoader.loadFromJSON(filename, drones, 1, true)) {
             renderer.setTrajectoryFile("Primary: " + filename);
             std::cout << "Loaded primary drone from: " << filename << std::endl;
@@ -2160,14 +2581,11 @@ public:
         float scaledDelta = deltaTime * timeScale;
         simulationTime += scaledDelta;
         
-        // Check if simulation reached 200 seconds
-        float totalDuration = 200.0f; // From JSON file
+        float totalDuration = 200.0f;
         
         if (simulationTime >= totalDuration) {
-            // Reset simulation time
             simulationTime = 0.0f;
             
-            // Reset all drones
             for (auto& drone : drones) {
                 drone->reset();
             }
@@ -2180,7 +2598,7 @@ public:
             drone->update(scaledDelta);
         }
         
-        // Update drone colors based on collisions from analysis file
+        // Update drone colors based on collisions
         auto currentCollisions = collisionLoader.getCollisionsAtTime(simulationTime, 1.0f);
         
         // Reset all drone colors first
@@ -2190,7 +2608,6 @@ public:
         
         // Color drones involved in current collisions
         for (const auto& collision : currentCollisions) {
-            // Extract drone number from conflicting_drone_id (e.g., "drone_4" -> 4)
             int droneNum = 0;
             if (collision.conflicting_drone_id.find("drone_") != std::string::npos) {
                 try {
@@ -2200,38 +2617,15 @@ public:
                 }
             }
             
-            // Color the conflicting drone based on severity
             for (auto& drone : drones) {
                 if (drone->getId() == droneNum && !drone->getIsPrimary()) {
                     if (collision.severity == "HIGH") {
                         drone->setColor(Vector3D(1, 0.2f, 0));
                     } else if (collision.severity == "MEDIUM") {
                         drone->setColor(Vector3D(1, 0.6f, 0));
-                    } else { // LOW
+                    } else {
                         drone->setColor(Vector3D(1, 0.9f, 0));
                     }
-                    break;
-                }
-            }
-        }
-        
-        // Color drones with upcoming collisions (within 5 seconds)
-        auto upcomingCollisions = collisionLoader.getCollisionsAtTime(simulationTime + 5.0f, 2.5f);
-        for (const auto& collision : upcomingCollisions) {
-            int droneNum = 0;
-            if (collision.conflicting_drone_id.find("drone_") != std::string::npos) {
-                try {
-                    droneNum = std::stoi(collision.conflicting_drone_id.substr(6));
-                } catch (...) {
-                    continue;
-                }
-            }
-            
-            // Color the conflicting drone yellow for warning
-            for (auto& drone : drones) {
-                if (drone->getId() == droneNum && !drone->getIsPrimary() && 
-                    drone->getColor().x < 0.9f) { // Not already colored red/orange
-                    drone->setColor(Vector3D(1, 1, 0.3f));
                     break;
                 }
             }
@@ -2279,7 +2673,6 @@ public:
         std::cout << "Time: " << std::fixed << std::setprecision(2) << simulationTime << "s" << std::endl;
         std::cout << "Total Drones: " << drones.size() << std::endl;
         
-        // Count primary vs regular drones
         int primaryCount = 0;
         for (const auto& drone : drones) {
             if (drone->getIsPrimary()) primaryCount++;
@@ -2291,7 +2684,6 @@ public:
         std::cout << "Total Collisions in Analysis: " << collisions.size() << std::endl;
         std::cout << "Active Collisions (now ±1s): " << currentCollisions.size() << std::endl;
         
-        // Print primary drone info
         for (const auto& drone : drones) {
             if (drone->getIsPrimary()) {
                 auto pos = drone->getPosition();
@@ -2303,7 +2695,6 @@ public:
             }
         }
         
-        // Print current collisions
         if (!currentCollisions.empty()) {
             std::cout << "\nCurrent Collisions:" << std::endl;
             for (const auto& collision : currentCollisions) {
@@ -2315,7 +2706,6 @@ public:
             }
         }
         
-        // Count collisions by severity
         std::map<std::string, int> severityCount;
         for (const auto& c : collisions) {
             severityCount[c.severity]++;
@@ -2367,7 +2757,7 @@ void timer(int value) {
 
 void keyboard(unsigned char key, int x, int y) {
     switch (key) {
-        case 27: // ESC
+        case 27:
             exit(0);
             break;
         case ' ':
@@ -2384,7 +2774,7 @@ void keyboard(unsigned char key, int x, int y) {
             {
                 std::string filename;
                 std::cout << "Enter JSON drone trajectory file path: ";
-                std::cin.ignore(); // Clear input buffer
+                std::cin.ignore();
                 std::getline(std::cin, filename);
                 if (!simulation->loadDroneTrajectory(filename)) {
                     std::cout << "Failed to load drone trajectory file." << std::endl;
@@ -2496,9 +2886,9 @@ void mouse(int button, int state, int x, int y) {
         mouseRightDown = (state == GLUT_DOWN);
     } else if (button == GLUT_MIDDLE_BUTTON) {
         mouseMiddleDown = (state == GLUT_DOWN);
-    } else if (button == 3) { // Mouse wheel up
+    } else if (button == 3) {
         simulation->zoomCamera(-20.0f);
-    } else if (button == 4) { // Mouse wheel down
+    } else if (button == 4) {
         simulation->zoomCamera(20.0f);
     } else if (state == GLUT_UP) {
         mouseLeftDown = mouseRightDown = mouseMiddleDown = false;
@@ -2526,43 +2916,30 @@ void motion(int x, int y) {
 
 void printInstructions() {
     std::cout << "\n╔══════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║  UAV DECONFLICTION SYSTEM - JSON COLLISION VISUALIZER     ║" << std::endl;
+    std::cout << "║  UAV DECONFLICTION SYSTEM - ENHANCED PRIMARY DRONE        ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
-    std::cout << "\n📋 ENHANCED CONTROLS:" << std::endl;
-    std::cout << "  ┌─ Camera Controls ─────────────────────────────────────" << std::endl;
-    std::cout << "  │ Mouse Wheel       Zoom in/out (smooth)" << std::endl;
-    std::cout << "  │ Left-drag         Rotate view (smooth)" << std::endl;
-    std::cout << "  │ Right-drag        Zoom in/out" << std::endl;
-    std::cout << "  │ Middle-drag       Pan camera" << std::endl;
-    std::cout << "  │ Arrows            Rotate/zoom camera" << std::endl;
-    std::cout << "  │ V                 Reset camera view" << std::endl;
-    std::cout << "  └───────────────────────────────────────────────────────" << std::endl;
-    std::cout << "\n🎮 SIMULATION CONTROLS:" << std::endl;
-    std::cout << "  │ SPACE             Pause/Resume simulation" << std::endl;
-    std::cout << "  │ R                 Reset simulation" << std::endl;
-    std::cout << "  │ N                 Load new JSON drone trajectory file" << std::endl;
-    std::cout << "  │ P                 Load new JSON primary drone trajectory" << std::endl;
-    std::cout << "  │ A                 Load new JSON collision analysis file" << std::endl;
-    std::cout << "  │ 1-4               Set simulation speed (0.5x to 5x)" << std::endl;
-    std::cout << "  │ S                 Print simulation status" << std::endl;
-    std::cout << "  └───────────────────────────────────────────────────────" << std::endl;
-    std::cout << "\n🔧 VISUALIZATION TOGGLES:" << std::endl;
-    std::cout << "  │ G                 Toggle grid" << std::endl;
-    std::cout << "  │ T                 Toggle trails" << std::endl;
-    std::cout << "  │ C                 Toggle collision zones" << std::endl;
-    std::cout << "  │ L                 Toggle trajectory lines" << std::endl;
-    std::cout << "  │ H                 Toggle HUD" << std::endl;
-    std::cout << "  │ B                 Toggle drone labels" << std::endl;
-    std::cout << "  └───────────────────────────────────────────────────────" << std::endl;
-    std::cout << "\n📁 FILE LOADING:" << std::endl;
-    std::cout << "  1. Primary Drone:   /home/arka/Trajectra/waypoint_generation/primary_waypoint.json" << std::endl;
-    std::cout << "  2. Regular Drones:  /home/arka/Trajectra/waypoint_generation/drone_waypoints.json" << std::endl;
-    std::cout << "  3. Collision Data:  /home/arka/Trajectra/trajectory_control/detailed_analysis.json" << std::endl;
-    std::cout << "\n⚠ FEATURES:" << std::endl;
-    std::cout << "  • Primary drone highlighted in GREEN with pulsing glow" << std::endl;
-    std::cout << "  • Collision zones shown based on JSON analysis data" << std::endl;
-    std::cout << "  • Drones change color when involved in collisions" << std::endl;
-    std::cout << "  • Real-time collision warnings in HUD" << std::endl;
+    std::cout << "\n📋 ENHANCED PRIMARY DRONE VISIBILITY:" << std::endl;
+    std::cout << "  • 40x larger than regular drones" << std::endl;
+    std::cout << "  • Bright green pulsing glow" << std::endl;
+    std::cout << "  • Long glowing breadcrumb trail" << std::endl;
+    std::cout << "  • Searchlight beam pointing down" << std::endl;
+    std::cout << "  • Compass showing direction" << std::endl;
+    std::cout << "  • Velocity vector arrow" << std::endl;
+    std::cout << "  • Enhanced HUD panel" << std::endl;
+    std::cout << "\n🎮 CONTROLS:" << std::endl;
+    std::cout << "  SPACE          Pause/Resume" << std::endl;
+    std::cout << "  R              Reset simulation" << std::endl;
+    std::cout << "  V              Reset camera" << std::endl;
+    std::cout << "  G              Toggle grid" << std::endl;
+    std::cout << "  T              Toggle trails" << std::endl;
+    std::cout << "  C              Toggle collision zones" << std::endl;
+    std::cout << "  L              Toggle trajectory lines" << std::endl;
+    std::cout << "  H              Toggle HUD" << std::endl;
+    std::cout << "  B              Toggle labels" << std::endl;
+    std::cout << "  1-4            Set speed (0.5x to 5x)" << std::endl;
+    std::cout << "  Mouse          Rotate/Zoom/Pan" << std::endl;
+    std::cout << "\n⚠ LOOK FOR THE LARGE GREEN PULSING SPHERE!" << std::endl;
+    std::cout << "   It leaves a glowing trail showing its path." << std::endl;
     std::cout << "\n═══════════════════════════════════════════════════════════════\n" << std::endl;
 }
 
@@ -2575,7 +2952,7 @@ int main(int argc, char** argv) {
     std::string primaryFile = "/home/arka/Trajectra/waypoint_generation/primary_waypoint.json";
     std::string analysisFile = "/home/arka/Trajectra/trajectory_control/detailed_analysis.json";
     
-    std::cout << "Starting UAV Deconfliction Simulation..." << std::endl;
+    std::cout << "Starting UAV Deconfliction Simulation with Enhanced Primary Drone..." << std::endl;
     std::cout << "Loading files:" << std::endl;
     std::cout << "  1. Primary drone: " << primaryFile << std::endl;
     std::cout << "  2. Regular drones: " << droneFile << std::endl;
@@ -2585,10 +2962,10 @@ int main(int argc, char** argv) {
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH | GLUT_MULTISAMPLE);
     glutInitWindowSize(1280, 720);
     glutInitWindowPosition(50, 50);
-    glutCreateWindow("UAV Deconfliction System - JSON Collision Visualizer");
+    glutCreateWindow("UAV Deconfliction System - ENHANCED PRIMARY DRONE VISUALIZER");
     
     // OpenGL initialization
-    glClearColor(0.02f, 0.02f, 0.05f, 1.0f);
+    glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -2644,8 +3021,8 @@ int main(int argc, char** argv) {
     }
     
     std::cout << "\n📊 Simulation starting..." << std::endl;
-    std::cout << "   Look for the GREEN primary drone!" << std::endl;
-    std::cout << "   Collision zones will appear based on analysis data." << std::endl;
+    std::cout << "   🔍 LOOK FOR THE LARGE GREEN PULSING PRIMARY DRONE!" << std::endl;
+    std::cout << "   🚁 It has a glowing trail showing its exact path." << std::endl;
     
     lastFrameTime = std::chrono::high_resolution_clock::now();
     
