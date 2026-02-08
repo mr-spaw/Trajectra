@@ -67,6 +67,8 @@ pip install nlohmann-json  # For C++ JSON support
 
 # For enhanced performance (optional)
 pip install numba
+pip install -r requirements.txt
+
 ```
 
 ### Step 3: Compile C++ Components
